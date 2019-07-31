@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const CHAR_SHEET_FILE_NAME: &str = "faces_16x16.jpg";
+const CHAR_SHEET_FILE_NAME: &str = "PetASCII_1080_version_GraphicsMode_DE.pbm";
 const CHAR_SHEET_ROWS: u8 = 16;
 const CHAR_SHEET_COLS: u8 = 16;
 
@@ -19,8 +19,8 @@ pub struct Vis {
 
 // The vulkan renderpass, pipeline and related items.
 struct Graphics {
-    render_pass: Arc<dyn vk::RenderPassAbstract + Send + Sync>,
-    pipeline: Arc<dyn vk::GraphicsPipelineAbstract + Send + Sync>,
+    render_pass: Arc<RenderPassTy>,
+    pipeline: Arc<PipelineTy>,
     vertex_buffer: Arc<vk::CpuAccessibleBuffer<[Vertex]>>,
     view_fbo: RefCell<ViewFbo>,
     sampler: Arc<vk::Sampler>,
@@ -44,6 +44,16 @@ struct InstanceData {
 vk::impl_vertex!(Vertex, position, tex_coords);
 vk::impl_vertex!(InstanceData, position_offset, tex_coords_offset);
 
+// The type of render pass stored within `Graphics`.
+type RenderPassTy = dyn vk::RenderPassAbstract + Send + Sync;
+
+// The type of the graphics pipeline stored within `Graphics`.
+type PipelineTy = vk::GraphicsPipeline<
+    vk::OneVertexOneInstanceDefinition<Vertex, InstanceData>,
+    Box<dyn vk::PipelineLayoutAbstract + Send + Sync>,
+    Arc<RenderPassTy>,
+>;
+
 /// Initialise the state of the visualisation.
 pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis {
     let char_sheet = load_char_sheet(assets_path, queue.clone());
@@ -55,11 +65,94 @@ pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis
 }
 
 /// Draw the visualisation to the `Frame`.
-pub fn view(vis: &Vis, frame: &Frame) {}
+pub fn view(vis: &Vis, device: Arc<vk::Device>, frame: &Frame) {
+    // Create the instance data buffer.
+    let instance_data_buffer = {
+        // TODO: Retrieve this from serial input instead.
+        let data: Vec<InstanceData> = (0..CHARS_PER_LINE as u16 * LINES as u16)
+            .map(|ix| {
+                let col_row = byte_to_char_sheet_col_row(random());
+                let tex_coords_offset = char_sheet_col_row_to_tex_coords_offset(col_row);
+                let position_offset = serial_char_index_to_position_offset(ix);
+                InstanceData {
+                    position_offset,
+                    tex_coords_offset,
+                }
+            })
+            .collect();
+
+        let usage = vk::BufferUsage::all();
+        vk::CpuAccessibleBuffer::from_iter(device, usage, data.into_iter())
+            .expect("failed to create `InstanceData` GPU buffer")
+    };
+
+    // Viewport and dynamic state.
+    let [w, h] = frame.image().dimensions();
+    let viewport = vk::ViewportBuilder::new().build([w as _, h as _]);
+    let dynamic_state = vk::DynamicState::default().viewports(vec![viewport]);
+
+    // Update view_fbo in case of resize.
+    vis.graphics
+        .view_fbo
+        .borrow_mut()
+        .update(frame, vis.graphics.render_pass.clone(), |builder, image| {
+            builder.add(image)
+        })
+        .expect("failed to update `ViewFbo`");
+
+    let clear_values = vec![vk::ClearValue::None];
+    let vertex_buffer = vis.graphics.vertex_buffer.clone();
+
+    frame
+        .add_commands()
+        .begin_render_pass(
+            vis.graphics.view_fbo.borrow().expect_inner(),
+            false,
+            clear_values,
+        )
+        .expect("failed to begin render pass")
+        .draw(
+            vis.graphics.pipeline.clone(),
+            &dynamic_state,
+            (vertex_buffer, instance_data_buffer),
+            vis.graphics.descriptor_set.clone(),
+            (),
+        )
+        .expect("failed to submit `draw` command")
+        .end_render_pass()
+        .expect("failed to add `end_render_pass` command");
+}
 
 /// Select the best GPU from those available.
 pub fn best_gpu(app: &App) -> Option<vk::PhysicalDevice> {
     find_discrete_gpu(app.vk_physical_devices()).or_else(|| app.default_vk_physical_device())
+}
+
+/// Given a byte value from the serial data, return the column and row of the character within the
+/// `CHAR_SHEET` starting from the top left.
+pub fn byte_to_char_sheet_col_row(_byte: u8) -> [u8; 2] {
+    // TODO: Implement this based on char sheet layout and byte data.
+    let col = random_range(0, 16);
+    let row = random_range(0, 16);
+    [col, row]
+}
+
+/// Given a column and row within the char sheet starting from the top left, produce the tex coords
+/// offset for that character.
+pub fn char_sheet_col_row_to_tex_coords_offset([col, row]: [u8; 2]) -> [f32; 2] {
+    let x = col as f32 / CHAR_SHEET_COLS as f32;
+    let y = row as f32 / CHAR_SHEET_ROWS as f32;
+    [x, y]
+}
+
+/// Given the index of a character within the serial data, produce the position offset for the
+/// character.
+pub fn serial_char_index_to_position_offset(char_index: u16) -> [f32; 2] {
+    let col = char_index % CHARS_PER_LINE as u16;
+    let row = char_index / CHARS_PER_LINE as u16;
+    let x = 2.0 * col as f32 / CHARS_PER_LINE as f32;
+    let y = 2.0 * row as f32 / LINES as f32;
+    [x, y]
 }
 
 // Load the character sheet.
@@ -139,16 +232,13 @@ fn create_render_pass(
 }
 
 // Create the graphics pipeline for running the shaders.
-fn create_pipeline<R>(render_pass: R) -> Arc<dyn vk::GraphicsPipelineAbstract + Send + Sync>
-where
-    R: vk::RenderPassAbstract + Send + Sync + 'static,
-{
+fn create_pipeline(render_pass: Arc<RenderPassTy>) -> Arc<PipelineTy> {
     let device = render_pass.device().clone();
     let vs = vs::Shader::load(device.clone()).expect("failed to load vertex shader");
     let fs = fs::Shader::load(device.clone()).expect("failed to load fragment shader");
     let subpass = vk::Subpass::from(render_pass, 0).expect("no subpass for `id`");
     let pipeline = vk::GraphicsPipeline::start()
-        //.sample_shading_enabled(1.0)
+        //.sample_shading_enabled(0.25)
         .vertex_input(vk::OneVertexOneInstanceDefinition::<Vertex, InstanceData>::new())
         .vertex_shader(vs.main_entry_point(), ())
         .triangle_list()
@@ -269,7 +359,8 @@ layout(location = 0) out vec4 f_color;
 layout(set = 0, binding = 0) uniform sampler2D char_sheet;
 
 void main() {
-    f_color = texture(char_sheet, v_tex_coords);
+    vec4 tex_color = texture(char_sheet, v_tex_coords);
+    f_color = vec4(0.0, 0.8, 0.4, 1.0) * tex_color;
 }
 "
     }

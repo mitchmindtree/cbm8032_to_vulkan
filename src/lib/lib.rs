@@ -70,7 +70,13 @@ fn vis_view(app: &App, model: &Model, frame: &Frame) {
         frame.clear(BLACK);
     }
 
-    vis::view(&model.vis, frame);
+    let device = app.window(model.vis_window)
+        .expect("visualisation window is inaccessible")
+        .swapchain_queue()
+        .device()
+        .clone();
+
+    vis::view(&model.vis, device, frame);
 }
 
 fn gui_view(app: &App, model: &Model, frame: &Frame) {
