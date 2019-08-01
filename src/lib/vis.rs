@@ -1,3 +1,6 @@
+//! Items related to the visualisation including vulkan graphics and character sheet logic.
+
+use crate::conf::Config;
 use nannou::image;
 use nannou::prelude::*;
 use std::cell::RefCell;
@@ -7,7 +10,6 @@ use std::sync::Arc;
 const CHAR_SHEET_FILE_NAME: &str = "PetASCII_1080_version_GraphicsMode_DE.pbm";
 const CHAR_SHEET_ROWS: u8 = 16;
 const CHAR_SHEET_COLS: u8 = 16;
-
 const CHARS_PER_LINE: u8 = 80;
 const LINES: u8 = 25;
 
@@ -22,9 +24,11 @@ struct Graphics {
     render_pass: Arc<RenderPassTy>,
     pipeline: Arc<PipelineTy>,
     vertex_buffer: Arc<vk::CpuAccessibleBuffer<[Vertex]>>,
+    instance_data_buffer_pool: vk::CpuBufferPool<InstanceData>,
+    uniform_buffer_pool: vk::CpuBufferPool<fs::ty::Data>,
     view_fbo: RefCell<ViewFbo>,
+    descriptor_set_pool: RefCell<vk::FixedSizeDescriptorSetsPool<Arc<PipelineTy>>>,
     sampler: Arc<vk::Sampler>,
-    descriptor_set: Arc<dyn vk::DescriptorSet + Send + Sync>,
 }
 
 // Vertex type used for GPU geometry.
@@ -57,7 +61,7 @@ type PipelineTy = vk::GraphicsPipeline<
 /// Initialise the state of the visualisation.
 pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis {
     let char_sheet = load_char_sheet(assets_path, queue.clone());
-    let graphics = init_graphics(queue, msaa_samples, &char_sheet);
+    let graphics = init_graphics(queue.device().clone(), msaa_samples);
     Vis {
         char_sheet,
         graphics,
@@ -65,7 +69,24 @@ pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis
 }
 
 /// Draw the visualisation to the `Frame`.
-pub fn view(vis: &Vis, device: Arc<vk::Device>, frame: &Frame) {
+pub fn view(config: &Config, vis: &Vis, frame: &Frame) {
+    // Create the uniform data buffer.
+    let uniform_buffer = {
+        let hsv = config.colouration.hsv();
+        let lin_srgb: LinSrgb = hsv.into();
+        let colouration = [
+            lin_srgb.red,
+            lin_srgb.green,
+            lin_srgb.blue,
+            config.colouration.alpha,
+        ];
+        let data = fs::ty::Data { colouration };
+        vis.graphics
+            .uniform_buffer_pool
+            .next(data)
+            .expect("failed to create uniform buffer")
+    };
+
     // Create the instance data buffer.
     let instance_data_buffer = {
         // TODO: Retrieve this from serial input instead.
@@ -80,11 +101,24 @@ pub fn view(vis: &Vis, device: Arc<vk::Device>, frame: &Frame) {
                 }
             })
             .collect();
-
-        let usage = vk::BufferUsage::all();
-        vk::CpuAccessibleBuffer::from_iter(device, usage, data.into_iter())
+        vis.graphics
+            .instance_data_buffer_pool
+            .chunk(data)
             .expect("failed to create `InstanceData` GPU buffer")
     };
+
+    // Build the descriptor set.
+    let descriptor_set = vis
+        .graphics
+        .descriptor_set_pool
+        .borrow_mut()
+        .next()
+        .add_buffer(uniform_buffer)
+        .expect("failed to add `uniform_buffer` to the descriptor set")
+        .add_sampled_image(vis.char_sheet.clone(), vis.graphics.sampler.clone())
+        .expect("failed to add character sheet sampler to the descriptor set")
+        .build()
+        .expect("failed to build the descriptor set");
 
     // Viewport and dynamic state.
     let [w, h] = frame.image().dimensions();
@@ -115,7 +149,7 @@ pub fn view(vis: &Vis, device: Arc<vk::Device>, frame: &Frame) {
             vis.graphics.pipeline.clone(),
             &dynamic_state,
             (vertex_buffer, instance_data_buffer),
-            vis.graphics.descriptor_set.clone(),
+            descriptor_set,
             (),
         )
         .expect("failed to submit `draw` command")
@@ -132,8 +166,8 @@ pub fn best_gpu(app: &App) -> Option<vk::PhysicalDevice> {
 /// `CHAR_SHEET` starting from the top left.
 pub fn byte_to_char_sheet_col_row(_byte: u8) -> [u8; 2] {
     // TODO: Implement this based on char sheet layout and byte data.
-    let col = random_range(0, 16);
-    let row = random_range(0, 16);
+    let col = random_range(0, CHAR_SHEET_COLS);
+    let row = random_range(0, CHAR_SHEET_ROWS);
     [col, row]
 }
 
@@ -180,29 +214,26 @@ fn load_char_sheet(
 }
 
 // Initialise the vulkan graphics state.
-fn init_graphics(
-    queue: Arc<vk::Queue>,
-    msaa_samples: u32,
-    char_sheet: &Arc<vk::ImmutableImage<vk::Format>>,
-) -> Graphics {
-    let device = queue.device().clone();
+fn init_graphics(device: Arc<vk::Device>, msaa_samples: u32) -> Graphics {
     let color_format = nannou::frame::COLOR_FORMAT;
     let render_pass = create_render_pass(device.clone(), color_format, msaa_samples);
     let pipeline = create_pipeline(render_pass.clone());
     let vertex_buffer = create_vertex_buffer(device.clone());
+    let instance_data_buffer_pool = create_instance_data_buffer_pool(device.clone());
+    let uniform_buffer_pool = create_uniform_buffer_pool(device.clone());
     let view_fbo = RefCell::new(Default::default());
-    let sampler = vk::SamplerBuilder::new()
-        .build(device)
-        .expect("failed to build sampler");
-    let descriptor_set =
-        create_descriptor_set(pipeline.clone(), char_sheet.clone(), sampler.clone());
+    let sampler = create_sampler(device.clone());
+    let descriptor_set_pool =
+        RefCell::new(vk::FixedSizeDescriptorSetsPool::new(pipeline.clone(), 0));
     Graphics {
         render_pass,
         pipeline,
         vertex_buffer,
+        instance_data_buffer_pool,
+        uniform_buffer_pool,
         view_fbo,
+        descriptor_set_pool,
         sampler,
-        descriptor_set,
     }
 }
 
@@ -238,7 +269,7 @@ fn create_pipeline(render_pass: Arc<RenderPassTy>) -> Arc<PipelineTy> {
     let fs = fs::Shader::load(device.clone()).expect("failed to load fragment shader");
     let subpass = vk::Subpass::from(render_pass, 0).expect("no subpass for `id`");
     let pipeline = vk::GraphicsPipeline::start()
-        //.sample_shading_enabled(0.25)
+        //.sample_shading_enabled(1.0)
         .vertex_input(vk::OneVertexOneInstanceDefinition::<Vertex, InstanceData>::new())
         .vertex_shader(vs.main_entry_point(), ())
         .triangle_list()
@@ -286,24 +317,31 @@ fn create_vertex_buffer(device: Arc<vk::Device>) -> Arc<vk::CpuAccessibleBuffer<
     // The two triangles that make up the rectangle.
     let vs = [tl, tr, br, tl, br, bl];
 
-    let usage = vk::BufferUsage::all();
+    let usage = vk::BufferUsage::vertex_buffer();
     let vertex_buffer = vk::CpuAccessibleBuffer::from_iter(device, usage, vs.iter().cloned())
         .expect("failed to construct vertex buffer");
     vertex_buffer
 }
 
-// Create the descriptor set with an image sampler for sampling the character sheet.
-fn create_descriptor_set(
-    pipeline: Arc<dyn vk::GraphicsPipelineAbstract + Send + Sync>,
-    char_sheet: Arc<vk::ImmutableImage<vk::Format>>,
-    sampler: Arc<vk::Sampler>,
-) -> Arc<dyn vk::DescriptorSet + Send + Sync> {
-    let descriptor_set = vk::PersistentDescriptorSet::start(pipeline.clone(), 0)
-        .add_sampled_image(char_sheet.clone(), sampler.clone())
-        .expect("failed to add character sheet sampler to the descriptor set")
-        .build()
-        .expect("failed to build the descriptor set");
-    Arc::new(descriptor_set)
+// Create the buffer pool for submitting unique instance data each frame.
+fn create_instance_data_buffer_pool(device: Arc<vk::Device>) -> vk::CpuBufferPool<InstanceData> {
+    let usage = vk::BufferUsage::vertex_buffer();
+    vk::CpuBufferPool::new(device, usage)
+}
+
+// Create the buffer pool for the uniform data.
+fn create_uniform_buffer_pool(device: Arc<vk::Device>) -> vk::CpuBufferPool<fs::ty::Data> {
+    let usage = vk::BufferUsage::all();
+    vk::CpuBufferPool::new(device, usage)
+}
+
+// Create the sampler used for sampling the character sheet image in the fragment shader.
+fn create_sampler(device: Arc<vk::Device>) -> Arc<vk::Sampler> {
+    vk::SamplerBuilder::new()
+        .mag_filter(vk::sampler::Filter::Nearest)
+        .min_filter(vk::sampler::Filter::Nearest)
+        .build(device)
+        .expect("failed to build sampler")
 }
 
 // Directory in which images are stored.
@@ -322,46 +360,17 @@ where
 }
 
 mod vs {
+    const _VS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib/glsl/vs.glsl"));
     nannou::vulkano_shaders::shader! {
         ty: "vertex",
-        src: "
-#version 450
-
-// The quad vertex positions.
-layout(location = 0) in vec2 position;
-layout(location = 1) in vec2 tex_coords;
-
-// The per-instance data.
-layout(location = 2) in vec2 position_offset;
-layout(location = 3) in vec2 tex_coords_offset;
-
-// Feed the offset texture coordinatees through to the frag shader.
-layout(location = 0) out vec2 v_tex_coords;
-
-void main() {
-    // Apply the tex coord offset for the instance.
-    v_tex_coords = tex_coords + tex_coords_offset;
-    // Apply the position offset for the instance.
-    gl_Position = vec4(position + position_offset, 0.0, 1.0);
-}"
+        path: "src/lib/glsl/vs.glsl",
     }
 }
 
 mod fs {
+    const _FS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib/glsl/fs.glsl"));
     nannou::vulkano_shaders::shader! {
         ty: "fragment",
-        src: "
-#version 450
-
-layout(location = 0) in vec2 v_tex_coords;
-layout(location = 0) out vec4 f_color;
-
-layout(set = 0, binding = 0) uniform sampler2D char_sheet;
-
-void main() {
-    vec4 tex_color = texture(char_sheet, v_tex_coords);
-    f_color = vec4(0.0, 0.8, 0.4, 1.0) * tex_color;
-}
-"
+        path: "src/lib/glsl/fs.glsl",
     }
 }
