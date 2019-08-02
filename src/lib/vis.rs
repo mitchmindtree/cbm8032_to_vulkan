@@ -12,6 +12,7 @@ const CHAR_SHEET_ROWS: u8 = 16;
 const CHAR_SHEET_COLS: u8 = 16;
 const CHARS_PER_LINE: u8 = 80;
 const LINES: u8 = 25;
+const CBM_8032_FRAME_DATA_LEN: u16 = CHARS_PER_LINE as u16 * LINES as u16;
 
 /// Items related to the visualisation.
 pub struct Vis {
@@ -48,6 +49,9 @@ struct InstanceData {
 vk::impl_vertex!(Vertex, position, tex_coords);
 vk::impl_vertex!(InstanceData, position_offset, tex_coords_offset);
 
+// The type used to represent the CBM 8032 graphical data.
+type Cbm8032FrameData = [u8; CBM_8032_FRAME_DATA_LEN as usize];
+
 // The type of render pass stored within `Graphics`.
 type RenderPassTy = dyn vk::RenderPassAbstract + Send + Sync;
 
@@ -69,7 +73,7 @@ pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis
 }
 
 /// Draw the visualisation to the `Frame`.
-pub fn view(config: &Config, vis: &Vis, frame: &Frame) {
+pub fn view(config: &Config, vis: &Vis, data: &Cbm8032FrameData, frame: &Frame) {
     // Create the uniform data buffer.
     let uniform_buffer = {
         let hsv = config.colouration.hsv();
@@ -90,9 +94,11 @@ pub fn view(config: &Config, vis: &Vis, frame: &Frame) {
     // Create the instance data buffer.
     let instance_data_buffer = {
         // TODO: Retrieve this from serial input instead.
-        let data: Vec<InstanceData> = (0..CHARS_PER_LINE as u16 * LINES as u16)
-            .map(|ix| {
-                let col_row = byte_to_char_sheet_col_row(random());
+        let data: Vec<InstanceData> = data
+            .iter()
+            .enumerate()
+            .map(|(ix, &byte)| {
+                let col_row = byte_to_char_sheet_col_row(byte);
                 let tex_coords_offset = char_sheet_col_row_to_tex_coords_offset(col_row);
                 let position_offset = serial_char_index_to_position_offset(ix);
                 InstanceData {
