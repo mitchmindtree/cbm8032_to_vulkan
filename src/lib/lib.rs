@@ -68,16 +68,15 @@ fn model(app: &App) -> Model {
     app.window(gui_window)
         .expect("GUI window closed unexpectedly")
         .set_position(GUI_WINDOW_X, GUI_WINDOW_Y);
-    app.window(vis_window)
-        .expect("visualisation window closed unexpectedly")
-        .set_position(VIS_WINDOW_X, VIS_WINDOW_Y);
 
-    if config.on_startup.fullscreen {
-        let window = app
-            .window(vis_window)
+    {
+        let w = app.window(vis_window)
             .expect("visualisation window closed unexpectedly");
-        window.set_fullscreen(Some(window.current_monitor()));
-        window.hide_cursor(true);
+        w.set_position(VIS_WINDOW_X, VIS_WINDOW_Y);
+        w.hide_cursor(true);
+        if config.on_startup.fullscreen {
+            w.set_fullscreen(Some(w.current_monitor()));
+        }
     }
 
     let serial_on = config.on_startup.serial;
