@@ -10,9 +10,18 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub fullscreen_on_startup: bool,
+    pub on_startup: OnStartup,
     #[serde(default)]
     pub colouration: Colouration,
+}
+
+/// Items that should run on startup.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OnStartup {
+    #[serde(default)]
+    pub fullscreen: bool,
+    #[serde(default)]
+    pub serial: bool,
 }
 
 /// Colouration of the visualisation.

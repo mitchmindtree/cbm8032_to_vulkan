@@ -2,6 +2,7 @@
 
 use crate::conf::Config;
 use crate::fps::Fps;
+use crate::serial;
 use nannou::prelude::*;
 use nannou::ui::conrod_core::widget_ids;
 use nannou::ui::prelude::*;
@@ -16,10 +17,18 @@ widget_ids! {
     pub struct Ids {
         background,
         title_text,
-        fps_avg_text,
-        fps_min_text,
-        fps_max_text,
         fullscreen_on_startup_toggle,
+        serial_on_startup_toggle,
+        serial_on_toggle,
+        serial_port_info_text,
+        vis_fps_text,
+        vis_fps_avg_text,
+        vis_fps_min_text,
+        vis_fps_max_text,
+        serial_fps_text,
+        serial_fps_avg_text,
+        serial_fps_min_text,
+        serial_fps_max_text,
         colouration_text,
         hue_slider,
         saturation_slider,
@@ -29,7 +38,14 @@ widget_ids! {
 }
 
 /// Update the user interface.
-pub fn update(ref mut ui: UiCell, ids: &Ids, config: &mut Config, vis_fps: &Fps) {
+pub fn update(
+    ref mut ui: UiCell,
+    ids: &Ids,
+    config: &mut Config,
+    serial_on: &mut bool,
+    vis_fps: &Fps,
+    serial_handle: Option<&serial::Handle>,
+) {
     widget::Canvas::new()
         .border(0.0)
         .rgb(0.1, 0.1, 0.1)
@@ -42,27 +58,74 @@ pub fn update(ref mut ui: UiCell, ids: &Ids, config: &mut Config, vis_fps: &Fps)
         .mid_top_of(ids.background)
         .set(ids.title_text, ui);
 
-    // Fullscreen on startup
+    // On startup
 
     for _click in button()
         .mid_left_of(ids.background)
         .down(PAD * 1.5)
-        .label(if config.fullscreen_on_startup {
+        .label(if config.on_startup.fullscreen {
             "Fullscreen On Startup - ENABLED"
         } else {
             "Fullscreen On Startup - DISABLED"
         })
-        .color(if config.fullscreen_on_startup {
+        .color(if config.on_startup.fullscreen {
             color::DARK_BLUE
         } else {
             color::BLACK
         })
         .set(ids.fullscreen_on_startup_toggle, ui)
     {
-        config.fullscreen_on_startup = !config.fullscreen_on_startup;
+        config.on_startup.fullscreen = !config.on_startup.fullscreen;
     }
 
-    // FPS
+    for _click in button()
+        .mid_left_of(ids.background)
+        .down(PAD * 0.5)
+        .label(if config.on_startup.serial {
+            "Serial On Startup - ENABLED"
+        } else {
+            "Serial On Startup - DISABLED"
+        })
+        .color(if config.on_startup.serial {
+            color::DARK_BLUE
+        } else {
+            color::BLACK
+        })
+        .set(ids.serial_on_startup_toggle, ui)
+    {
+        config.on_startup.serial = !config.on_startup.serial;
+    }
+
+    for _click in button()
+        .mid_left_of(ids.background)
+        .down(PAD * 0.5)
+        .label(if *serial_on {
+            "Serial - ENABLED"
+        } else {
+            "Serial - DISABLED"
+        })
+        .color(if *serial_on {
+            color::DARK_BLUE
+        } else {
+            color::BLACK
+        })
+        .set(ids.serial_on_toggle, ui)
+    {
+        *serial_on = !*serial_on;
+    }
+
+    // Serial port info
+
+    if let Some(handle) = serial_handle {
+        let s = format!("{:#?}", handle.port_info());
+        widget::Text::new(&s)
+            .down(PAD * 0.5)
+            .font_size(14)
+            .color(color::WHITE)
+            .set(ids.serial_port_info_text, ui);
+    }
+
+    // Vis FPS
 
     fn fps_to_rgb(fps: f64) -> (f32, f32, f32) {
         let r = clamp(map_range(fps, 0.0, 60.0, 1.0, 0.0), 0.0, 1.0);
@@ -71,14 +134,20 @@ pub fn update(ref mut ui: UiCell, ids: &Ids, config: &mut Config, vis_fps: &Fps)
         (r, g, b)
     }
 
+    widget::Text::new("Visual Rate")
+        .mid_left_of(ids.background)
+        .down(PAD * 1.5)
+        .font_size(16)
+        .color(color::WHITE)
+        .set(ids.vis_fps_text, ui);
+
     let label = format!("{:.2} AVG FPS", vis_fps.avg());
     let (r, g, b) = fps_to_rgb(vis_fps.avg());
     widget::Text::new(&label)
-        .mid_left_of(ids.background)
-        .down(PAD * 1.5)
+        .down(PAD)
         .font_size(14)
         .rgb(r, g, b)
-        .set(ids.fps_avg_text, ui);
+        .set(ids.vis_fps_avg_text, ui);
 
     let label = format!("{:.2} MIN FPS", vis_fps.min());
     let (r, g, b) = fps_to_rgb(vis_fps.min());
@@ -86,7 +155,7 @@ pub fn update(ref mut ui: UiCell, ids: &Ids, config: &mut Config, vis_fps: &Fps)
         .down(PAD * 0.5)
         .font_size(14)
         .rgb(r, g, b)
-        .set(ids.fps_min_text, ui);
+        .set(ids.vis_fps_min_text, ui);
 
     let label = format!("{:.2} MAX FPS", vis_fps.max());
     let (r, g, b) = fps_to_rgb(vis_fps.max());
@@ -94,12 +163,47 @@ pub fn update(ref mut ui: UiCell, ids: &Ids, config: &mut Config, vis_fps: &Fps)
         .down(PAD * 0.5)
         .font_size(14)
         .rgb(r, g, b)
-        .set(ids.fps_max_text, ui);
+        .set(ids.vis_fps_max_text, ui);
+
+    // Serial FPS
+
+    widget::Text::new("Serial Rate")
+        .mid_left_with_margin_on(ids.background, COLUMN_W / 2.0)
+        .align_top_of(ids.vis_fps_text)
+        .font_size(16)
+        .color(color::WHITE)
+        .set(ids.serial_fps_text, ui);
+
+    let serial_fps = serial_handle.map(|handle| handle.frame_hz()).unwrap_or_default();
+    let label = format!("{:.2} AVG FPS", serial_fps.avg);
+    let (r, g, b) = fps_to_rgb(serial_fps.avg);
+    widget::Text::new(&label)
+        .down(PAD)
+        .font_size(14)
+        .rgb(r, g, b)
+        .set(ids.serial_fps_avg_text, ui);
+
+    let label = format!("{:.2} MIN FPS", serial_fps.min);
+    let (r, g, b) = fps_to_rgb(serial_fps.min);
+    widget::Text::new(&label)
+        .down(PAD * 0.5)
+        .font_size(14)
+        .rgb(r, g, b)
+        .set(ids.serial_fps_min_text, ui);
+
+    let label = format!("{:.2} MAX FPS", serial_fps.max);
+    let (r, g, b) = fps_to_rgb(serial_fps.max);
+    widget::Text::new(&label)
+        .down(PAD * 0.5)
+        .font_size(14)
+        .rgb(r, g, b)
+        .set(ids.serial_fps_max_text, ui);
 
     // Colouration
 
     text("Colouration")
-        .down(PAD * 1.5)
+        .down_from(ids.vis_fps_max_text, PAD * 1.5)
+        .align_left_of(ids.vis_fps_max_text)
         .font_size(16)
         .set(ids.colouration_text, ui);
 

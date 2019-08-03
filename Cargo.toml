@@ -16,7 +16,7 @@ path = "src/bin/main.rs"
 nannou = "0.10"
 serde = "1"
 serde_json = "1"
-serial = "0.4"
+serialport = "3"
 vulkano = "0.13"
 
 [patch.crates-io]

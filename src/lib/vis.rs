@@ -7,18 +7,36 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const CHAR_SHEET_FILE_NAME: &str = "PetASCII_1080_version_GraphicsMode_DE.pbm";
-const CHAR_SHEET_ROWS: u8 = 16;
+const CHAR_SHEET_FILE_NAME: &str = "PetASCII_Combined.png";
+const CHAR_SHEET_ROWS: u8 = 32;
 const CHAR_SHEET_COLS: u8 = 16;
 const CHARS_PER_LINE: u8 = 80;
 const LINES: u8 = 25;
-const CBM_8032_FRAME_DATA_LEN: u16 = CHARS_PER_LINE as u16 * LINES as u16;
+const GRAPHICS_MODE_ROW_OFFSET: u8 = 0;
+const TEXT_MODE_ROW_OFFSET: u8 = 16;
+
+pub const CBM_8032_FRAME_DATA_LEN: usize = CHARS_PER_LINE as usize * LINES as usize;
 
 /// Items related to the visualisation.
 pub struct Vis {
     char_sheet: Arc<vk::ImmutableImage<vk::Format>>,
     graphics: Graphics,
 }
+
+/// The frame type representing all data necessary for displaying a single frame.
+pub struct Cbm8032Frame {
+    pub mode: Cbm8032FrameMode,
+    pub data: Box<Cbm8032FrameData>,
+}
+
+/// The two modes in which
+pub enum Cbm8032FrameMode {
+    Graphics,
+    Text,
+}
+
+/// The type used to represent the CBM 8032 graphical data.
+pub type Cbm8032FrameData = [u8; CBM_8032_FRAME_DATA_LEN];
 
 // The vulkan renderpass, pipeline and related items.
 struct Graphics {
@@ -49,9 +67,6 @@ struct InstanceData {
 vk::impl_vertex!(Vertex, position, tex_coords);
 vk::impl_vertex!(InstanceData, position_offset, tex_coords_offset);
 
-// The type used to represent the CBM 8032 graphical data.
-type Cbm8032FrameData = [u8; CBM_8032_FRAME_DATA_LEN as usize];
-
 // The type of render pass stored within `Graphics`.
 type RenderPassTy = dyn vk::RenderPassAbstract + Send + Sync;
 
@@ -61,6 +76,28 @@ type PipelineTy = vk::GraphicsPipeline<
     Box<dyn vk::PipelineLayoutAbstract + Send + Sync>,
     Arc<RenderPassTy>,
 >;
+
+impl Cbm8032Frame {
+    const BLANK_BYTE: u8 = 32;
+    const BLANK_DATA: Cbm8032FrameData = [Self::BLANK_BYTE; CBM_8032_FRAME_DATA_LEN];
+
+    /// Construct a new `Cbm8032Frame` from the given mode and data.
+    pub fn new(mode: Cbm8032FrameMode, data: Box<Cbm8032FrameData>) -> Self {
+        Cbm8032Frame {
+            mode,
+            data,
+        }
+    }
+
+    /// Create a frame containing random data in graphics mode.
+    pub fn random_graphics() -> Self {
+        let mut data = Box::new(Self::BLANK_DATA);
+        for b in data.iter_mut() {
+            *b = random();
+        }
+        Self::new(Cbm8032FrameMode::Graphics, data)
+    }
+}
 
 /// Initialise the state of the visualisation.
 pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis {
@@ -73,7 +110,7 @@ pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis
 }
 
 /// Draw the visualisation to the `Frame`.
-pub fn view(config: &Config, vis: &Vis, data: &Cbm8032FrameData, frame: &Frame) {
+pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: &Frame) {
     // Create the uniform data buffer.
     let uniform_buffer = {
         let hsv = config.colouration.hsv();
@@ -94,13 +131,14 @@ pub fn view(config: &Config, vis: &Vis, data: &Cbm8032FrameData, frame: &Frame) 
     // Create the instance data buffer.
     let instance_data_buffer = {
         // TODO: Retrieve this from serial input instead.
-        let data: Vec<InstanceData> = data
+        let data: Vec<InstanceData> = cbm_frame
+            .data
             .iter()
             .enumerate()
             .map(|(ix, &byte)| {
-                let col_row = byte_to_char_sheet_col_row(byte);
+                let col_row = byte_to_char_sheet_col_row(byte, &cbm_frame.mode);
                 let tex_coords_offset = char_sheet_col_row_to_tex_coords_offset(col_row);
-                let position_offset = serial_char_index_to_position_offset(ix);
+                let position_offset = serial_char_index_to_position_offset(ix as _);
                 InstanceData {
                     position_offset,
                     tex_coords_offset,
@@ -170,10 +208,13 @@ pub fn best_gpu(app: &App) -> Option<vk::PhysicalDevice> {
 
 /// Given a byte value from the serial data, return the column and row of the character within the
 /// `CHAR_SHEET` starting from the top left.
-pub fn byte_to_char_sheet_col_row(_byte: u8) -> [u8; 2] {
-    // TODO: Implement this based on char sheet layout and byte data.
-    let col = random_range(0, CHAR_SHEET_COLS);
-    let row = random_range(0, CHAR_SHEET_ROWS);
+pub fn byte_to_char_sheet_col_row(byte: u8, mode: &Cbm8032FrameMode) -> [u8; 2] {
+    let row_offset = match mode {
+        Cbm8032FrameMode::Graphics => GRAPHICS_MODE_ROW_OFFSET,
+        Cbm8032FrameMode::Text => TEXT_MODE_ROW_OFFSET,
+    };
+    let col = byte % CHAR_SHEET_COLS;
+    let row = row_offset + byte / (CHAR_SHEET_ROWS / 2);
     [col, row]
 }
 

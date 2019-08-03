@@ -7,6 +7,7 @@ use nannou::Ui;
 mod conf;
 mod fps;
 mod gui;
+mod serial;
 mod vis;
 
 const WINDOW_PAD: i32 = 20;
@@ -14,16 +15,19 @@ const GUI_WINDOW_X: i32 = WINDOW_PAD;
 const GUI_WINDOW_Y: i32 = WINDOW_PAD;
 const VIS_WINDOW_X: i32 = GUI_WINDOW_X + gui::WINDOW_WIDTH as i32 + WINDOW_PAD;
 const VIS_WINDOW_Y: i32 = GUI_WINDOW_Y;
-const VIS_WINDOW_W: u32 = 1280;
-const VIS_WINDOW_H: u32 = 720;
+const VIS_WINDOW_W: u32 = 1920;
+const VIS_WINDOW_H: u32 = 1000;
 
 struct Model {
-    config: Config,
     _vis_window: window::Id,
     _gui_window: window::Id,
+    config: Config,
     ui: Ui,
     ids: gui::Ids,
     vis: Vis,
+    serial_on: bool,
+    serial_handle: Option<serial::Handle>,
+    vis_frame: vis::Cbm8032Frame,
     vis_fps: Fps,
 }
 
@@ -64,18 +68,20 @@ fn model(app: &App) -> Model {
     app.window(gui_window)
         .expect("GUI window closed unexpectedly")
         .set_position(GUI_WINDOW_X, GUI_WINDOW_Y);
-
     app.window(vis_window)
         .expect("visualisation window closed unexpectedly")
         .set_position(VIS_WINDOW_X, VIS_WINDOW_Y);
 
-    if config.fullscreen_on_startup {
+    if config.on_startup.fullscreen {
         let window = app
             .window(vis_window)
             .expect("visualisation window closed unexpectedly");
         window.set_fullscreen(Some(window.current_monitor()));
         window.hide_cursor(true);
     }
+
+    let serial_on = config.on_startup.serial;
+    let serial_handle = None;
 
     let mut ui = app
         .new_ui()
@@ -87,33 +93,57 @@ fn model(app: &App) -> Model {
     let queue = app.window(vis_window).unwrap().swapchain_queue().clone();
     let msaa_samples = app.window(vis_window).unwrap().msaa_samples();
     let vis = vis::init(&assets, queue, msaa_samples);
-
+    let vis_frame = vis::Cbm8032Frame::random_graphics();
     let vis_fps = Fps::default();
 
     Model {
-        config,
         _vis_window: vis_window,
         _gui_window: gui_window,
+        config,
         ui,
         ids,
         vis,
+        serial_on,
+        serial_handle,
+        vis_frame,
         vis_fps,
     }
 }
 
 fn update(_app: &App, model: &mut Model, _update: Update) {
     let ui = model.ui.set_widgets();
-    gui::update(ui, &model.ids, &mut model.config, &model.vis_fps);
+    let handle = model.serial_handle.as_ref();
+    gui::update(ui, &model.ids, &mut model.config, &mut model.serial_on, &model.vis_fps, handle);
+
+    // If `serial_on` is indicated but we have no stream, start one.
+    if model.serial_on && model.serial_handle.is_none() {
+        match serial::spawn() {
+            Ok(handle) => model.serial_handle = Some(handle),
+            Err(err) => {
+                eprintln!("failed to start serial stream: {}", err);
+                model.serial_on = false;
+            }
+        }
+    // If `serial_on` is `false` and we have a stream, close the stream.
+    } else if !model.serial_on && model.serial_handle.is_some() {
+        model.serial_handle.take().unwrap().close();
+    }
+
+    if let Some(handle) = model.serial_handle.as_ref() {
+        if let Some(new_frame) = handle.try_recv_frame() {
+            model.vis_frame = new_frame;
+        }
+    }
+
+    model.vis_frame = vis::Cbm8032Frame::random_graphics();
 }
 
 fn vis_view(_app: &App, model: &Model, frame: &Frame) {
     if frame.nth() == 0 {
         frame.clear(BLACK);
     }
-
     model.vis_fps.sample();
-
-    vis::view(&model.config, &model.vis, frame);
+    vis::view(&model.config, &model.vis, &model.vis_frame, frame);
 }
 
 fn gui_view(app: &App, model: &Model, frame: &Frame) {
@@ -123,10 +153,11 @@ fn gui_view(app: &App, model: &Model, frame: &Frame) {
         .expect("failed to draw `Ui` to `Frame`");
 }
 
-fn exit(app: &App, model: Model) {
+fn exit(app: &App, mut model: Model) {
     let assets = app
         .assets_path()
         .expect("failed to find project `assets` directory");
     let config_path = conf::path(&assets);
     save_to_json(config_path, &model.config).expect("failed to save config");
+    model.serial_handle.take().map(|handle| handle.close());
 }
