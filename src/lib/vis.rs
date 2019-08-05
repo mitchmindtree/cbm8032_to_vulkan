@@ -30,6 +30,7 @@ pub struct Cbm8032Frame {
 }
 
 /// The two modes in which
+#[derive(Clone, Copy, Debug)]
 pub enum Cbm8032FrameMode {
     Graphics,
     Text,
@@ -89,13 +90,19 @@ impl Cbm8032Frame {
         }
     }
 
+    /// Create a frame containing blank data in graphics mode.
+    pub fn blank_graphics() -> Self {
+        let data = Box::new(Self::BLANK_DATA);
+        Self::new(Cbm8032FrameMode::Graphics, data)
+    }
+
     /// Create a frame containing random data in graphics mode.
-    pub fn random_graphics() -> Self {
-        let mut data = Box::new(Self::BLANK_DATA);
-        for b in data.iter_mut() {
+    pub fn _random_graphics() -> Self {
+        let mut frame = Self::blank_graphics();
+        for b in frame.data.iter_mut() {
             *b = random();
         }
-        Self::new(Cbm8032FrameMode::Graphics, data)
+        frame
     }
 }
 

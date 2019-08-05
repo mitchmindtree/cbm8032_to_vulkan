@@ -92,7 +92,7 @@ fn model(app: &App) -> Model {
     let queue = app.window(vis_window).unwrap().swapchain_queue().clone();
     let msaa_samples = app.window(vis_window).unwrap().msaa_samples();
     let vis = vis::init(&assets, queue, msaa_samples);
-    let vis_frame = vis::Cbm8032Frame::random_graphics();
+    let vis_frame = vis::Cbm8032Frame::blank_graphics();
     let vis_fps = Fps::default();
 
     Model {
@@ -133,8 +133,6 @@ fn update(_app: &App, model: &mut Model, _update: Update) {
             model.vis_frame = new_frame;
         }
     }
-
-    model.vis_frame = vis::Cbm8032Frame::random_graphics();
 }
 
 fn vis_view(_app: &App, model: &Model, frame: &Frame) {
