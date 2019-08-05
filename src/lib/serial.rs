@@ -133,10 +133,6 @@ fn read_from(port: &mut Box<SerialPortObj>, buffer: &mut [u8]) -> usize {
     }
 }
 
-fn read_bytes(port: &mut Box<SerialPortObj>, buffer: &mut [u8]) -> usize {
-    read_from(port, buffer)
-}
-
 fn byte_to_mode(byte: u8) -> vis::Cbm8032FrameMode {
     match byte {
         0 => vis::Cbm8032FrameMode::Graphics,
@@ -208,7 +204,7 @@ fn receive_screen(port: &mut Box<SerialPortObj>, context: &mut ReceiverContext) 
     loop {
         if context.rx_buffer_index == context.rx_buffer_count {
             context.rx_buffer_index = 0;
-            context.rx_buffer_count = read_bytes(port, &mut context.rx_buffer) as _;
+            context.rx_buffer_count = read_from(port, &mut context.rx_buffer) as _;
         } else {
             let ix = context.rx_buffer_index;
             context.rx_buffer_index += 1;
