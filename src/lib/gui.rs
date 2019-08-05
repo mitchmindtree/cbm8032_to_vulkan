@@ -20,7 +20,6 @@ widget_ids! {
         fullscreen_on_startup_toggle,
         serial_on_startup_toggle,
         serial_on_toggle,
-        serial_port_info_text,
         vis_fps_text,
         vis_fps_avg_text,
         vis_fps_min_text,
@@ -34,6 +33,7 @@ widget_ids! {
         saturation_slider,
         brightness_slider,
         alpha_slider,
+        serial_port_info_text,
     }
 }
 
@@ -112,17 +112,6 @@ pub fn update(
         .set(ids.serial_on_toggle, ui)
     {
         *serial_on = !*serial_on;
-    }
-
-    // Serial port info
-
-    if let Some(handle) = serial_handle {
-        let s = format!("{:#?}", handle.port_info());
-        widget::Text::new(&s)
-            .down(PAD * 0.5)
-            .font_size(14)
-            .color(color::WHITE)
-            .set(ids.serial_port_info_text, ui);
     }
 
     // Vis FPS
@@ -258,6 +247,30 @@ pub fn update(
         .set(ids.alpha_slider, ui)
     {
         config.colouration.alpha = new_alpha;
+    }
+
+    // Serial port info
+
+    if let Some(handle) = serial_handle {
+        let info = handle.port_info();
+        let mut s = format!("USB Serial Port:  {:?}\n", info.port_name);
+        if let serialport::SerialPortType::UsbPort(ref usb) = info.port_type {
+            s.push_str(&format!("    VID:  {}\n    PID:  {}\n", usb.vid, usb.pid));
+            if let Some(ref serial_number) = usb.serial_number {
+                s.push_str(&format!("    Serial Number:  {}\n", serial_number));
+            }
+            if let Some(ref manufacturer) = usb.manufacturer {
+                s.push_str(&format!("    Manufacturer:  {}\n", manufacturer));
+            }
+            if let Some(ref product) = usb.product {
+                s.push_str(&format!("    Product:  {}\n", product));
+            }
+        }
+        widget::Text::new(&s)
+            .down(PAD * 1.5)
+            .font_size(14)
+            .color(color::WHITE)
+            .set(ids.serial_port_info_text, ui);
     }
 }
 
