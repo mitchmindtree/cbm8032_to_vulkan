@@ -3,6 +3,7 @@
 use crate::conf::Config;
 use crate::fps::Fps;
 use crate::serial;
+use crate::vis;
 use nannou::prelude::*;
 use nannou::ui::conrod_core::widget_ids;
 use nannou::ui::prelude::*;
@@ -20,6 +21,8 @@ widget_ids! {
         fullscreen_on_startup_toggle,
         serial_on_startup_toggle,
         serial_on_toggle,
+        clear_frame_button,
+        random_frame_button,
         vis_fps_text,
         vis_fps_avg_text,
         vis_fps_min_text,
@@ -45,6 +48,7 @@ pub fn update(
     serial_on: &mut bool,
     vis_fps: &Fps,
     serial_handle: Option<&serial::Handle>,
+    frame: &mut vis::Cbm8032Frame,
 ) {
     widget::Canvas::new()
         .border(0.0)
@@ -112,6 +116,26 @@ pub fn update(
         .set(ids.serial_on_toggle, ui)
     {
         *serial_on = !*serial_on;
+    }
+
+    let frame_button_w = (COLUMN_W - PAD * 0.5) / 2.0;
+    for _click in button()
+        .mid_left_of(ids.background)
+        .down(PAD * 0.5)
+        .w(frame_button_w)
+        .label("CLEAR FRAME")
+        .set(ids.clear_frame_button, ui)
+    {
+        *frame = vis::Cbm8032Frame::blank_graphics();
+    }
+
+    for _click in button()
+        .right(PAD * 0.5)
+        .w(frame_button_w)
+        .label("RANDOM FRAME")
+        .set(ids.random_frame_button, ui)
+    {
+        vis::randomise_frame_data(&mut frame.data);
     }
 
     // Vis FPS

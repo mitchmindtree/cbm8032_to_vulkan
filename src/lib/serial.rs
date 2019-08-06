@@ -46,7 +46,7 @@ fn init_receiver_context() -> ReceiverContext {
         count: 0,
         state: State::CountingZeros,
         buffer: [0u8; 40],
-        screen_buffer: Box::new([0u8; 2000]),
+        screen_buffer: Box::new([0u8; vis::CBM_8032_FRAME_DATA_LEN]),
         graphic: vis::Cbm8032FrameMode::Graphics,
     }
 }

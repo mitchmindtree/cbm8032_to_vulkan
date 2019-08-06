@@ -11,11 +11,13 @@ const CHAR_SHEET_FILE_NAME: &str = "PetASCII_Combined.png";
 const CHAR_SHEET_ROWS: u8 = 32;
 const CHAR_SHEET_COLS: u8 = 16;
 const CHARS_PER_LINE: u8 = 80;
-const LINES: u8 = 25;
+const DATA_LINES: u8 = 25;
+const BLANK_LINES: u8 = 2;
+const TOTAL_LINES: u8 = DATA_LINES + BLANK_LINES;
 const GRAPHICS_MODE_ROW_OFFSET: u8 = 0;
 const TEXT_MODE_ROW_OFFSET: u8 = 16;
 
-pub const CBM_8032_FRAME_DATA_LEN: usize = CHARS_PER_LINE as usize * LINES as usize;
+pub const CBM_8032_FRAME_DATA_LEN: usize = CHARS_PER_LINE as usize * DATA_LINES as usize;
 
 /// Items related to the visualisation.
 pub struct Vis {
@@ -99,10 +101,15 @@ impl Cbm8032Frame {
     /// Create a frame containing random data in graphics mode.
     pub fn _random_graphics() -> Self {
         let mut frame = Self::blank_graphics();
-        for b in frame.data.iter_mut() {
-            *b = random();
-        }
+        randomise_frame_data(&mut frame.data);
         frame
+    }
+}
+
+/// Randomise the given frame data.
+pub fn randomise_frame_data(data: &mut Cbm8032FrameData) {
+    for b in data.iter_mut() {
+        *b = random();
     }
 }
 
@@ -137,12 +144,16 @@ pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: &Frame)
 
     // Create the instance data buffer.
     let instance_data_buffer = {
-        // TODO: Retrieve this from serial input instead.
-        let data: Vec<InstanceData> = cbm_frame
-            .data
-            .iter()
+        fn blank_line_bytes() -> impl Iterator<Item = u8> {
+            (0..CHARS_PER_LINE).map(|_| Cbm8032Frame::BLANK_BYTE)
+        }
+
+        let all_bytes = blank_line_bytes()
+            .chain(cbm_frame.data.iter().cloned())
+            .chain(blank_line_bytes());
+        let data: Vec<InstanceData> = all_bytes
             .enumerate()
-            .map(|(ix, &byte)| {
+            .map(|(ix, byte)| {
                 let col_row = byte_to_char_sheet_col_row(byte, &cbm_frame.mode);
                 let tex_coords_offset = char_sheet_col_row_to_tex_coords_offset(col_row);
                 let position_offset = serial_char_index_to_position_offset(ix as _);
@@ -239,7 +250,7 @@ pub fn serial_char_index_to_position_offset(char_index: u16) -> [f32; 2] {
     let col = char_index % CHARS_PER_LINE as u16;
     let row = char_index / CHARS_PER_LINE as u16;
     let x = 2.0 * col as f32 / CHARS_PER_LINE as f32;
-    let y = 2.0 * row as f32 / LINES as f32;
+    let y = 2.0 * row as f32 / TOTAL_LINES as f32;
     [x, y]
 }
 
@@ -342,7 +353,7 @@ fn create_vertex_buffer(device: Arc<vk::Device>) -> Arc<vk::CpuAccessibleBuffer<
     // - left to right: -1.0 to 1.0
     // - bottom to top: 1.0 to -1.0
     let p_w = 2.0 / CHARS_PER_LINE as f32;
-    let p_h = 2.0 / LINES as f32;
+    let p_h = 2.0 / TOTAL_LINES as f32;
     let p_tl = [-1.0, -1.0];
     let p_tr = [-1.0 + p_w, -1.0];
     let p_bl = [-1.0, -1.0 + p_h];

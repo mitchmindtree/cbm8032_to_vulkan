@@ -15,8 +15,8 @@ const GUI_WINDOW_X: i32 = WINDOW_PAD;
 const GUI_WINDOW_Y: i32 = WINDOW_PAD;
 const VIS_WINDOW_X: i32 = GUI_WINDOW_X + gui::WINDOW_WIDTH as i32 + WINDOW_PAD;
 const VIS_WINDOW_Y: i32 = GUI_WINDOW_Y;
-const VIS_WINDOW_W: u32 = 1920;
-const VIS_WINDOW_H: u32 = 1000;
+const VIS_WINDOW_W: u32 = 960;
+const VIS_WINDOW_H: u32 = 540;
 
 struct Model {
     _vis_window: window::Id,
@@ -112,7 +112,15 @@ fn model(app: &App) -> Model {
 fn update(_app: &App, model: &mut Model, _update: Update) {
     let ui = model.ui.set_widgets();
     let handle = model.serial_handle.as_ref();
-    gui::update(ui, &model.ids, &mut model.config, &mut model.serial_on, &model.vis_fps, handle);
+    gui::update(
+        ui,
+        &model.ids,
+        &mut model.config,
+        &mut model.serial_on,
+        &model.vis_fps,
+        handle,
+        &mut model.vis_frame,
+    );
 
     // If `serial_on` is indicated but we have no stream, start one.
     if model.serial_on && model.serial_handle.is_none() {
