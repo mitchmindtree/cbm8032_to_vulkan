@@ -4,6 +4,7 @@ use crate::fps::Fps;
 use crate::vis;
 use serialport::prelude::*;
 use std::cell::RefCell;
+use std::io;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{mpsc, Arc};
 
@@ -91,6 +92,13 @@ impl Handle {
     pub fn port_info(&self) -> &SerialPortInfo {
         &self.port_info
     }
+
+    /// Whether or not the stream has closed.
+    ///
+    /// This can happen if a serious error occurs on the serial thread.
+    pub fn is_closed(&self) -> bool {
+        self.is_closed.load(atomic::Ordering::SeqCst)
+    }
 }
 
 fn find_usb_port() -> Result<Option<SerialPortInfo>, serialport::Error> {
@@ -110,27 +118,6 @@ fn open_port(name: &str) -> Result<Box<SerialPortObj>, serialport::Error> {
     settings.baud_rate = BAUD_RATE.into();
     settings.timeout = std::time::Duration::from_secs(1);
     serialport::open_with_settings(&name, &settings)
-}
-
-// The same as `Read::read` but ignores `TimedOut` and `WouldBlock` errors.
-fn read_from(port: &mut Box<SerialPortObj>, buffer: &mut [u8]) -> usize {
-    match port.read(buffer) {
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::TimedOut => {
-                eprintln!("no serial data received in the last second");
-                0
-            }
-            std::io::ErrorKind::WouldBlock => 0,
-            _ => {
-                eprintln!(
-                    "An error occurred while reading from the serial port: {}",
-                    e
-                );
-                0
-            }
-        },
-        Ok(len) => len,
-    }
 }
 
 fn byte_to_mode(byte: u8) -> vis::Cbm8032FrameMode {
@@ -200,17 +187,21 @@ fn handle_received_byte(context: &mut ReceiverContext, byte: u8) -> bool {
     screen_complete
 }
 
-fn receive_screen(port: &mut Box<SerialPortObj>, context: &mut ReceiverContext) {
+fn receive_screen(port: &mut Box<SerialPortObj>, context: &mut ReceiverContext) -> io::Result<()> {
     loop {
         if context.rx_buffer_index == context.rx_buffer_count {
             context.rx_buffer_index = 0;
-            context.rx_buffer_count = read_from(port, &mut context.rx_buffer) as _;
+            context.rx_buffer_count = match port.read(&mut context.rx_buffer) {
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(err) => return Err(err),
+                Ok(len) => len as _,
+            };
         } else {
             let ix = context.rx_buffer_index;
             context.rx_buffer_index += 1;
             let received_byte = context.rx_buffer[ix as usize];
             if handle_received_byte(context, received_byte) {
-                return;
+                return Ok(());
             }
         }
     }
@@ -218,10 +209,37 @@ fn receive_screen(port: &mut Box<SerialPortObj>, context: &mut ReceiverContext) 
 
 // Open the serial port and run the read loop.
 fn run(mut port: Box<SerialPortObj>, vis_frame_tx: ChannelTx, is_closed: Arc<AtomicBool>) {
+    let port_name = port.name();
     let fps = Fps::default();
     let mut context = init_receiver_context();
     while !is_closed.load(atomic::Ordering::Relaxed) {
-        receive_screen(&mut port, &mut context);
+        if let Err(e) = receive_screen(&mut port, &mut context) {
+            if let io::ErrorKind::TimedOut = e.kind() {
+                eprintln!("No serial data received in the last second");
+                continue;
+            }
+            eprintln!("An error occurred while reading from the serial port: {}", e);
+            if let Some(ref port_name) = port_name {
+                let attempts = 3;
+                for attempt in 0..attempts {
+                    println!("Attempting to re-establish connection with {:?}", port_name);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    match open_port(&port_name) {
+                        Ok(new_port) => port = new_port,
+                        Err(err) => {
+                            eprintln!("failed to connect to port: {}", err);
+                            if attempt < attempts - 1 {
+                                continue;
+                            }
+                            is_closed.store(true, atomic::Ordering::SeqCst);
+                        }
+                    };
+                    break;
+                }
+
+            }
+            continue;
+        }
 
         // Construct the frame.
         let frame = vis::Cbm8032Frame::new(context.graphic, context.screen_buffer.clone());

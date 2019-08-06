@@ -27,6 +27,7 @@ struct Model {
     vis: Vis,
     serial_on: bool,
     serial_handle: Option<serial::Handle>,
+    last_serial_connection_attempt: Option<std::time::Instant>,
     vis_frame: vis::Cbm8032Frame,
     vis_fps: Fps,
 }
@@ -94,6 +95,7 @@ fn model(app: &App) -> Model {
     let vis = vis::init(&assets, queue, msaa_samples);
     let vis_frame = vis::Cbm8032Frame::blank_graphics();
     let vis_fps = Fps::default();
+    let last_serial_connection_attempt = None;
 
     Model {
         _vis_window: vis_window,
@@ -104,6 +106,7 @@ fn model(app: &App) -> Model {
         vis,
         serial_on,
         serial_handle,
+        last_serial_connection_attempt,
         vis_frame,
         vis_fps,
     }
@@ -124,16 +127,27 @@ fn update(_app: &App, model: &mut Model, _update: Update) {
 
     // If `serial_on` is indicated but we have no stream, start one.
     if model.serial_on && model.serial_handle.is_none() {
-        match serial::spawn() {
-            Ok(handle) => model.serial_handle = Some(handle),
-            Err(err) => {
-                eprintln!("failed to start serial stream: {}", err);
-                model.serial_on = false;
+        let now = std::time::Instant::now();
+        let should_attempt = match model.last_serial_connection_attempt {
+            None => true,
+            Some(last) => now.duration_since(last) > std::time::Duration::from_secs(1),
+        };
+        if should_attempt {
+            model.last_serial_connection_attempt = Some(now);
+            match serial::spawn() {
+                Ok(handle) => model.serial_handle = Some(handle),
+                Err(err) => eprintln!("failed to start serial stream: {}", err),
             }
         }
+
     // If `serial_on` is `false` and we have a stream, close the stream.
     } else if !model.serial_on && model.serial_handle.is_some() {
         model.serial_handle.take().unwrap().close();
+    }
+
+    // If we have a serial handle and it has closed, drop the handle.
+    if model.serial_handle.as_ref().map(|h| h.is_closed()).unwrap_or(true) {
+        model.serial_handle.take();
     }
 
     if let Some(handle) = model.serial_handle.as_ref() {
