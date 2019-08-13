@@ -4,7 +4,7 @@ use crate::fps::Fps;
 use crate::vis;
 use serialport::prelude::*;
 use std::cell::RefCell;
-use std::io;
+use std::io::{self, Write};
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{mpsc, Arc};
 
@@ -113,10 +113,34 @@ fn find_usb_port() -> Result<Option<SerialPortInfo>, serialport::Error> {
     Ok(info)
 }
 
-fn open_port(name: &str) -> Result<Box<SerialPortObj>, serialport::Error> {
+fn port_settings() -> SerialPortSettings {
     let mut settings = SerialPortSettings::default();
     settings.baud_rate = BAUD_RATE.into();
     settings.timeout = std::time::Duration::from_secs(1);
+    settings
+}
+
+fn open_port(name: &str) -> Result<Box<SerialPortObj>, serialport::Error> {
+    if cfg!(target_os = "linux") {
+        let res = std::process::Command::new("setserial")
+            .arg(&name)
+            .arg("low_latency")
+            .output();
+        match res {
+            Ok(output) => {
+                if !output.status.success() {
+                    eprintln!("`setserial {} low_latency` was unsuccessful", name);
+                }
+                if !output.stderr.is_empty() {
+                    io::stderr().write_all(&output.stderr).ok();
+                }
+            }
+            Err(err) => {
+                eprintln!("failed to execute command `setserial {} low_latency`: {}", name, err);
+            }
+        }
+    }
+    let settings = port_settings();
     serialport::open_with_settings(&name, &settings)
 }
 
