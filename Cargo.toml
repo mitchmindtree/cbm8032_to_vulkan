@@ -13,7 +13,7 @@ name = "cbm8032_to_vulkan"
 path = "src/bin/main.rs"
 
 [dependencies]
-nannou = "0.10"
+nannou = { git = "https://github.com/mitchmindtree/nannou", branch = "cbm8032-backup" }
 serde = "1"
 serde_json = "1"
 serialport = "3"

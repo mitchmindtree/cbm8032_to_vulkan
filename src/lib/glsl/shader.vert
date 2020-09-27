@@ -15,5 +15,7 @@ void main() {
     // Apply the tex coord offset for the instance.
     v_tex_coords = tex_coords + tex_coords_offset;
     // Apply the position offset for the instance.
-    gl_Position = vec4(position + position_offset, 0.0, 1.0);
+    vec2 pos = position + position_offset;
+    pos.y *= -1;
+    gl_Position = vec4(pos, 0.0, 1.0);
 }
