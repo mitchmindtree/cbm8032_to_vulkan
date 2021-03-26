@@ -47,36 +47,34 @@ fn model(app: &App) -> Model {
         .ok()
         .unwrap_or_else(Config::default);
 
-    let physical_device = vis::best_gpu(app).expect("no available GPU detected on system");
-
     let vis_window = app
         .new_window()
-        .with_title("CBM 8032 VIS")
-        .vk_physical_device(physical_device)
-        .with_dimensions(VIS_WINDOW_W, VIS_WINDOW_H)
+        .title("CBM 8032 VIS")
+        .size(VIS_WINDOW_W, VIS_WINDOW_H)
         .view(vis_view)
+        .decorations(false)
         .build()
         .expect("failed to build visualisation window");
 
     let gui_window = app
         .new_window()
-        .with_title("CBM 8032 GUI")
-        .with_dimensions(gui::WINDOW_WIDTH, gui::WINDOW_HEIGHT)
+        .title("CBM 8032 GUI")
+        .size(gui::WINDOW_WIDTH, gui::WINDOW_HEIGHT)
         .view(gui_view)
         .build()
         .expect("failed to build GUI window");
 
     app.window(gui_window)
         .expect("GUI window closed unexpectedly")
-        .set_position(GUI_WINDOW_X, GUI_WINDOW_Y);
+        .set_outer_position_pixels(GUI_WINDOW_X, GUI_WINDOW_Y);
 
     {
         let w = app.window(vis_window)
             .expect("visualisation window closed unexpectedly");
-        w.set_position(VIS_WINDOW_X, VIS_WINDOW_Y);
-        w.hide_cursor(true);
+        w.set_outer_position_pixels(VIS_WINDOW_X, VIS_WINDOW_Y);
+        w.set_cursor_visible(false);
         if config.on_startup.fullscreen {
-            w.set_fullscreen(Some(w.current_monitor()));
+            w.set_fullscreen(true);
         }
     }
 
@@ -90,9 +88,9 @@ fn model(app: &App) -> Model {
         .expect("failed to build `Ui` for GUI window");
     let ids = gui::Ids::new(ui.widget_id_generator());
 
-    let queue = app.window(vis_window).unwrap().swapchain_queue().clone();
-    let msaa_samples = app.window(vis_window).unwrap().msaa_samples();
-    let vis = vis::init(&assets, queue, msaa_samples);
+    let window = app.window(vis_window).unwrap();
+    let msaa_samples = window.msaa_samples();
+    let vis = vis::init(&assets, &*window, msaa_samples);
     let vis_frame = vis::Cbm8032Frame::blank_graphics();
     let vis_fps = Fps::default();
     let last_serial_connection_attempt = None;
@@ -157,7 +155,7 @@ fn update(_app: &App, model: &mut Model, _update: Update) {
     }
 }
 
-fn vis_view(_app: &App, model: &Model, frame: &Frame) {
+fn vis_view(_app: &App, model: &Model, frame: Frame) {
     if frame.nth() == 0 {
         frame.clear(BLACK);
     }
@@ -165,10 +163,10 @@ fn vis_view(_app: &App, model: &Model, frame: &Frame) {
     vis::view(&model.config, &model.vis, &model.vis_frame, frame);
 }
 
-fn gui_view(app: &App, model: &Model, frame: &Frame) {
+fn gui_view(app: &App, model: &Model, frame: Frame) {
     model
         .ui
-        .draw_to_frame(app, frame)
+        .draw_to_frame(app, &frame)
         .expect("failed to draw `Ui` to `Frame`");
 }
 

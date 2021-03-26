@@ -3,9 +3,7 @@
 use crate::conf::Config;
 use nannou::image;
 use nannou::prelude::*;
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 const CHAR_SHEET_FILE_NAME: &str = "PetASCII_Combined.png";
 const CHAR_SHEET_ROWS: u8 = 32;
@@ -16,12 +14,14 @@ const BLANK_LINES: u8 = 2;
 const TOTAL_LINES: u8 = DATA_LINES + BLANK_LINES;
 const GRAPHICS_MODE_ROW_OFFSET: u8 = 0;
 const TEXT_MODE_ROW_OFFSET: u8 = 16;
+const VERTEX_COUNT: usize = 6;
 
 pub const CBM_8032_FRAME_DATA_LEN: usize = CHARS_PER_LINE as usize * DATA_LINES as usize;
 
 /// Items related to the visualisation.
 pub struct Vis {
-    char_sheet: Arc<vk::ImmutableImage<vk::Format>>,
+    _char_sheet: wgpu::Texture,
+    _char_sheet_view: wgpu::TextureView,
     graphics: Graphics,
 }
 
@@ -43,42 +43,34 @@ pub type Cbm8032FrameData = [u8; CBM_8032_FRAME_DATA_LEN];
 
 // The vulkan renderpass, pipeline and related items.
 struct Graphics {
-    render_pass: Arc<RenderPassTy>,
-    pipeline: Arc<PipelineTy>,
-    vertex_buffer: Arc<vk::CpuAccessibleBuffer<[Vertex]>>,
-    instance_data_buffer_pool: vk::CpuBufferPool<InstanceData>,
-    uniform_buffer_pool: vk::CpuBufferPool<fs::ty::Data>,
-    view_fbo: RefCell<ViewFbo>,
-    descriptor_set_pool: RefCell<vk::FixedSizeDescriptorSetsPool<Arc<PipelineTy>>>,
-    sampler: Arc<vk::Sampler>,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    vertex_buffer: wgpu::Buffer,
+    _sampler: wgpu::Sampler,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct Uniforms {
+    colouration: [f32; 4],
 }
 
 // Vertex type used for GPU geometry.
 #[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
 struct Vertex {
     position: [f32; 2],
     tex_coords: [f32; 2],
 }
 
-// InstanceData is the vertex type that describes the unique data per instance.
+// Instance is the vertex type that describes the unique data per instance.
 #[derive(Clone, Copy, Debug, Default)]
-struct InstanceData {
+#[repr(C)]
+struct Instance {
     position_offset: [f32; 2],
     tex_coords_offset: [f32; 2],
 }
-
-vk::impl_vertex!(Vertex, position, tex_coords);
-vk::impl_vertex!(InstanceData, position_offset, tex_coords_offset);
-
-// The type of render pass stored within `Graphics`.
-type RenderPassTy = dyn vk::RenderPassAbstract + Send + Sync;
-
-// The type of the graphics pipeline stored within `Graphics`.
-type PipelineTy = vk::GraphicsPipeline<
-    vk::OneVertexOneInstanceDefinition<Vertex, InstanceData>,
-    Box<dyn vk::PipelineLayoutAbstract + Send + Sync>,
-    Arc<RenderPassTy>,
->;
 
 impl Cbm8032Frame {
     const BLANK_BYTE: u8 = 32;
@@ -104,6 +96,13 @@ impl Cbm8032Frame {
         randomise_frame_data(&mut frame.data);
         frame
     }
+
+    pub fn _test_graphics() -> Self {
+        let mut frame = Self::_random_graphics();
+        let data = [27u8; 16];
+        frame.data[..16].copy_from_slice(&data);
+        frame
+    }
 }
 
 /// Randomise the given frame data.
@@ -114,114 +113,76 @@ pub fn randomise_frame_data(data: &mut Cbm8032FrameData) {
 }
 
 /// Initialise the state of the visualisation.
-pub fn init(assets_path: &Path, queue: Arc<vk::Queue>, msaa_samples: u32) -> Vis {
-    let char_sheet = load_char_sheet(assets_path, queue.clone());
-    let graphics = init_graphics(queue.device().clone(), msaa_samples);
+pub fn init(assets_path: &Path, window: &nannou::window::Window, msaa_samples: u32) -> Vis {
+    let char_sheet = load_char_sheet(assets_path, window);
+    let char_sheet_view = char_sheet.view().build();
+    let device = window.swap_chain_device();
+    let graphics = init_graphics(device, msaa_samples, &char_sheet_view);
     Vis {
-        char_sheet,
+        _char_sheet: char_sheet,
+        _char_sheet_view: char_sheet_view,
         graphics,
     }
 }
 
 /// Draw the visualisation to the `Frame`.
-pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: &Frame) {
-    // Create the uniform data buffer.
-    let uniform_buffer = {
-        let hsv = config.colouration.hsv();
-        let lin_srgb: LinSrgb = hsv.into();
-        let colouration = [
-            lin_srgb.red,
-            lin_srgb.green,
-            lin_srgb.blue,
-            config.colouration.alpha,
-        ];
-        let data = fs::ty::Data { colouration };
-        vis.graphics
-            .uniform_buffer_pool
-            .next(data)
-            .expect("failed to create uniform buffer")
-    };
+pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: Frame) {
+    let device_queue_pair = frame.device_queue_pair();
+    let device = device_queue_pair.device();
+
+    // Update the uniforms.
+    let hsv = config.colouration.hsv();
+    let lin_srgb: LinSrgb = hsv.into();
+    let colouration = [lin_srgb.red, lin_srgb.green, lin_srgb.blue, config.colouration.alpha];
+    let uniforms = Uniforms { colouration };
+    let uniforms_size = std::mem::size_of::<Uniforms>() as wgpu::BufferAddress;
+    let uniforms_bytes = uniforms_as_bytes(&uniforms);
+    let usage = wgpu::BufferUsage::COPY_SRC;
+    let new_uniform_buffer = device.create_buffer_with_data(uniforms_bytes, usage);
 
     // Create the instance data buffer.
-    let instance_data_buffer = {
-        fn blank_line_bytes() -> impl Iterator<Item = u8> {
-            (0..CHARS_PER_LINE).map(|_| Cbm8032Frame::BLANK_BYTE)
-        }
-
-        let all_bytes = blank_line_bytes()
-            .chain(cbm_frame.data.iter().cloned())
-            .chain(blank_line_bytes());
-        let data: Vec<InstanceData> = all_bytes
-            .enumerate()
-            .map(|(ix, byte)| {
-                let col_row = byte_to_char_sheet_col_row(byte, &cbm_frame.mode);
-                let tex_coords_offset = char_sheet_col_row_to_tex_coords_offset(col_row);
-                let position_offset = serial_char_index_to_position_offset(ix as _);
-                InstanceData {
-                    position_offset,
-                    tex_coords_offset,
-                }
-            })
-            .collect();
-        vis.graphics
-            .instance_data_buffer_pool
-            .chunk(data)
-            .expect("failed to create `InstanceData` GPU buffer")
-    };
-
-    // Build the descriptor set.
-    let descriptor_set = vis
-        .graphics
-        .descriptor_set_pool
-        .borrow_mut()
-        .next()
-        .add_buffer(uniform_buffer)
-        .expect("failed to add `uniform_buffer` to the descriptor set")
-        .add_sampled_image(vis.char_sheet.clone(), vis.graphics.sampler.clone())
-        .expect("failed to add character sheet sampler to the descriptor set")
-        .build()
-        .expect("failed to build the descriptor set");
-
-    // Viewport and dynamic state.
-    let [w, h] = frame.image().dimensions();
-    let viewport = vk::ViewportBuilder::new().build([w as _, h as _]);
-    let dynamic_state = vk::DynamicState::default().viewports(vec![viewport]);
-
-    // Update view_fbo in case of resize.
-    vis.graphics
-        .view_fbo
-        .borrow_mut()
-        .update(frame, vis.graphics.render_pass.clone(), |builder, image| {
-            builder.add(image)
+    fn blank_line_bytes() -> impl Iterator<Item = u8> {
+        (0..CHARS_PER_LINE).map(|_| Cbm8032Frame::BLANK_BYTE)
+    }
+    let all_bytes = blank_line_bytes()
+        .chain(cbm_frame.data.iter().cloned())
+        .chain(blank_line_bytes());
+    let instances: Vec<Instance> = all_bytes
+        .enumerate()
+        .map(|(ix, byte)| {
+            let col_row = byte_to_char_sheet_col_row(byte, &cbm_frame.mode);
+            let tex_coords_offset = char_sheet_col_row_to_tex_coords_offset(col_row);
+            let position_offset = serial_char_index_to_position_offset(ix as _);
+            Instance {
+                position_offset,
+                tex_coords_offset,
+            }
         })
-        .expect("failed to update `ViewFbo`");
+        .collect();
+    let instances_bytes = instances_as_bytes(&instances[..]);
+    let usage = wgpu::BufferUsage::VERTEX;
+    let instance_buffer = device.create_buffer_with_data(instances_bytes, usage);
 
-    let clear_values = vec![vk::ClearValue::None];
-    let vertex_buffer = vis.graphics.vertex_buffer.clone();
+    // Encode the new buffer copies and the render pass.
+    let mut encoder = frame.command_encoder();
+    encoder.copy_buffer_to_buffer(&new_uniform_buffer, 0, &vis.graphics.uniform_buffer, 0, uniforms_size);
 
-    frame
-        .add_commands()
-        .begin_render_pass(
-            vis.graphics.view_fbo.borrow().expect_inner(),
-            false,
-            clear_values,
-        )
-        .expect("failed to begin render pass")
-        .draw(
-            vis.graphics.pipeline.clone(),
-            &dynamic_state,
-            (vertex_buffer, instance_data_buffer),
-            descriptor_set,
-            (),
-        )
-        .expect("failed to submit `draw` command")
-        .end_render_pass()
-        .expect("failed to add `end_render_pass` command");
-}
-
-/// Select the best GPU from those available.
-pub fn best_gpu(app: &App) -> Option<vk::PhysicalDevice> {
-    find_discrete_gpu(app.vk_physical_devices()).or_else(|| app.default_vk_physical_device())
+    let load_op = wgpu::LoadOp::Load;
+    let clear_color = wgpu::Color::TRANSPARENT;
+    let mut render_pass = wgpu::RenderPassBuilder::new()
+        .color_attachment(frame.texture_view(), |color| {
+            color
+                .load_op(load_op)
+                .clear_color(clear_color)
+        })
+        .begin(&mut encoder);
+    render_pass.set_bind_group(0, &vis.graphics.bind_group, &[]);
+    render_pass.set_pipeline(&vis.graphics.pipeline);
+    render_pass.set_vertex_buffer(0, &vis.graphics.vertex_buffer, 0, 0);
+    render_pass.set_vertex_buffer(1, &instance_buffer, 0, 0);
+    let vertex_range = 0..VERTEX_COUNT as u32;
+    let instance_range = 0..instances.len() as u32;
+    render_pass.draw(vertex_range, instance_range);
 }
 
 /// Given a byte value from the serial data, return the column and row of the character within the
@@ -255,103 +216,129 @@ pub fn serial_char_index_to_position_offset(char_index: u16) -> [f32; 2] {
 }
 
 // Load the character sheet.
-fn load_char_sheet(
-    assets_path: &Path,
-    queue: Arc<vk::Queue>,
-) -> Arc<vk::ImmutableImage<vk::Format>> {
+fn load_char_sheet(assets_path: &Path, window: &nannou::window::Window) -> wgpu::Texture {
     let images_path = images_path(assets_path);
     let path = images_path.join(CHAR_SHEET_FILE_NAME);
     let image = image::open(&path).expect("failed to open image");
-    let rgb_image = image.to_rgb();
-    let (width, height) = rgb_image.dimensions();
-    let raw_image = rgb_image.into_raw();
-    let image_data = raw_image.into_iter();
-    let dims = vk::image::Dimensions::Dim2d { width, height };
-    let format = vk::Format::R8G8B8Srgb;
-    let (image, img_fut) = vk::ImmutableImage::from_iter(image_data, dims, format, queue)
-        .expect("failed to load character sheet onto GPU");
-    img_fut
-        .then_signal_fence_and_flush()
-        .expect("failed to signal fence and flush `img_fut`")
-        .wait(None)
-        .expect("failed to wait for the `img_fut`");
-    image
+    // Load the image as a texture.
+    wgpu::Texture::from_image(window, &image)
 }
 
-// Initialise the vulkan graphics state.
-fn init_graphics(device: Arc<vk::Device>, msaa_samples: u32) -> Graphics {
-    let color_format = nannou::frame::COLOR_FORMAT;
-    let render_pass = create_render_pass(device.clone(), color_format, msaa_samples);
-    let pipeline = create_pipeline(render_pass.clone());
+// Initialise the WGPU graphics state.
+fn init_graphics(
+    device: &wgpu::Device,
+    msaa_samples: u32,
+    char_sheet: &wgpu::TextureView,
+) -> Graphics {
+    // Load shader modules.
+    let vs_mod = wgpu::shader_from_spirv_bytes(device, include_bytes!("glsl/vert.spv"));
+    let fs_mod = wgpu::shader_from_spirv_bytes(device, include_bytes!("glsl/frag.spv"));
+
+    // let render_pass = create_render_pass(device.clone(), color_format, msaa_samples);
+
+    // Initialise the uniform buffer.
+    let colouration = [0.0; 4];
+    let uniforms = Uniforms { colouration };
+    let uniforms_bytes = uniforms_as_bytes(&uniforms);
+    let usage = wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST;
+    let uniform_buffer = device.create_buffer_with_data(uniforms_bytes, usage);
+
+    // For sampling the char sheet.
+    let sampler = create_sampler(device);
+
+    let bind_group_layout = create_bind_group_layout(device, char_sheet.component_type());
+    let bind_group = create_bind_group(device, &bind_group_layout, &uniform_buffer, char_sheet, &sampler);
+    let pipeline_layout = create_pipeline_layout(device, &bind_group_layout);
+    let pipeline = create_pipeline(
+        device,
+        &pipeline_layout,
+        &vs_mod,
+        &fs_mod,
+        Frame::TEXTURE_FORMAT,
+        msaa_samples,
+    );
+
     let vertex_buffer = create_vertex_buffer(device.clone());
-    let instance_data_buffer_pool = create_instance_data_buffer_pool(device.clone());
-    let uniform_buffer_pool = create_uniform_buffer_pool(device.clone());
-    let view_fbo = RefCell::new(Default::default());
-    let sampler = create_sampler(device.clone());
-    let descriptor_set_pool =
-        RefCell::new(vk::FixedSizeDescriptorSetsPool::new(pipeline.clone(), 0));
+
     Graphics {
-        render_pass,
         pipeline,
+        bind_group,
         vertex_buffer,
-        instance_data_buffer_pool,
-        uniform_buffer_pool,
-        view_fbo,
-        descriptor_set_pool,
-        sampler,
+        uniform_buffer,
+        _sampler: sampler,
     }
 }
 
-// The render pass used for the graphics pipeline.
-fn create_render_pass(
-    device: Arc<vk::Device>,
-    color_format: vk::Format,
-    msaa_samples: u32,
-) -> Arc<dyn vk::RenderPassAbstract + Send + Sync> {
-    let rp = vk::single_pass_renderpass!(
-        device,
-        attachments: {
-            color: {
-                load: Load,
-                store: Store,
-                format: color_format,
-                samples: msaa_samples,
-            }
-        },
-        pass: {
-            color: [color],
-            depth_stencil: {}
-        }
-    )
-    .expect("failed to create renderpass");
-    Arc::new(rp)
+fn create_bind_group_layout(
+    device: &wgpu::Device,
+    texture_component_type: wgpu::TextureComponentType,
+) -> wgpu::BindGroupLayout {
+    wgpu::BindGroupLayoutBuilder::new()
+        .uniform_buffer(wgpu::ShaderStage::FRAGMENT, false)
+        .sampled_texture(
+            wgpu::ShaderStage::FRAGMENT,
+            false,
+            wgpu::TextureViewDimension::D2,
+            texture_component_type,
+        )
+        .sampler(wgpu::ShaderStage::FRAGMENT)
+        .build(device)
 }
 
-// Create the graphics pipeline for running the shaders.
-fn create_pipeline(render_pass: Arc<RenderPassTy>) -> Arc<PipelineTy> {
-    let device = render_pass.device().clone();
-    let vs = vs::Shader::load(device.clone()).expect("failed to load vertex shader");
-    let fs = fs::Shader::load(device.clone()).expect("failed to load fragment shader");
-    let subpass = vk::Subpass::from(render_pass, 0).expect("no subpass for `id`");
-    let pipeline = vk::GraphicsPipeline::start()
-        //.sample_shading_enabled(1.0)
-        .vertex_input(vk::OneVertexOneInstanceDefinition::<Vertex, InstanceData>::new())
-        .vertex_shader(vs.main_entry_point(), ())
-        .triangle_list()
-        .viewports_dynamic_scissors_irrelevant(1)
-        .fragment_shader(fs.main_entry_point(), ())
-        .blend_alpha_blending()
-        .render_pass(subpass)
-        .build(device)
-        .expect("failed to create graphics pipeline");
-    Arc::new(pipeline)
+fn create_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buffer: &wgpu::Buffer,
+    texture_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    wgpu::BindGroupBuilder::new()
+        .buffer::<Uniforms>(uniform_buffer, 0..1)
+        .texture_view(texture_view)
+        .sampler(sampler)
+        .build(device, layout)
 }
+
+fn create_pipeline_layout(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::PipelineLayout {
+    let desc = wgpu::PipelineLayoutDescriptor {
+        bind_group_layouts: &[&bind_group_layout],
+    };
+    device.create_pipeline_layout(&desc)
+}
+
+fn create_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    vs_mod: &wgpu::ShaderModule,
+    fs_mod: &wgpu::ShaderModule,
+    dst_format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    wgpu::RenderPipelineBuilder::from_layout(layout, vs_mod)
+        .fragment_shader(&fs_mod)
+        .color_format(dst_format)
+        .add_vertex_buffer::<Vertex>(&wgpu::vertex_attr_array![
+            0 => Float2,
+            1 => Float2
+        ])
+        .add_instance_buffer::<Instance>(&wgpu::vertex_attr_array![
+            2 => Float2,
+            3 => Float2
+        ])
+        .sample_count(sample_count)
+        .build(device)
+}
+
+
 
 // Create a vertex buffer containing the two triangles that make up a single character slot.
-fn create_vertex_buffer(device: Arc<vk::Device>) -> Arc<vk::CpuAccessibleBuffer<[Vertex]>> {
+fn create_vertex_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     // Vertex position range:
     // - left to right: -1.0 to 1.0
-    // - bottom to top: 1.0 to -1.0
+    // - bottom to top: -1.0 to 1.0
     let p_w = 2.0 / CHARS_PER_LINE as f32;
     let p_h = 2.0 / TOTAL_LINES as f32;
     let p_tl = [-1.0, -1.0];
@@ -382,31 +369,19 @@ fn create_vertex_buffer(device: Arc<vk::Device>) -> Arc<vk::CpuAccessibleBuffer<
     // The two triangles that make up the rectangle.
     let vs = [tl, tr, br, tl, br, bl];
 
-    let usage = vk::BufferUsage::vertex_buffer();
-    let vertex_buffer = vk::CpuAccessibleBuffer::from_iter(device, usage, vs.iter().cloned())
-        .expect("failed to construct vertex buffer");
-    vertex_buffer
-}
+    assert_eq!(vs.len(), VERTEX_COUNT);
 
-// Create the buffer pool for submitting unique instance data each frame.
-fn create_instance_data_buffer_pool(device: Arc<vk::Device>) -> vk::CpuBufferPool<InstanceData> {
-    let usage = vk::BufferUsage::vertex_buffer();
-    vk::CpuBufferPool::new(device, usage)
-}
-
-// Create the buffer pool for the uniform data.
-fn create_uniform_buffer_pool(device: Arc<vk::Device>) -> vk::CpuBufferPool<fs::ty::Data> {
-    let usage = vk::BufferUsage::all();
-    vk::CpuBufferPool::new(device, usage)
+    let vertices_bytes = vertices_as_bytes(&vs[..]);
+    let usage = wgpu::BufferUsage::VERTEX;
+    device.create_buffer_with_data(vertices_bytes, usage)
 }
 
 // Create the sampler used for sampling the character sheet image in the fragment shader.
-fn create_sampler(device: Arc<vk::Device>) -> Arc<vk::Sampler> {
-    vk::SamplerBuilder::new()
-        .mag_filter(vk::sampler::Filter::Nearest)
-        .min_filter(vk::sampler::Filter::Nearest)
+fn create_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    wgpu::SamplerBuilder::new()
+        .mag_filter(wgpu::FilterMode::Nearest)
+        .min_filter(wgpu::FilterMode::Nearest)
         .build(device)
-        .expect("failed to build sampler")
 }
 
 // Directory in which images are stored.
@@ -414,28 +389,16 @@ fn images_path(assets: &Path) -> PathBuf {
     assets.join("images")
 }
 
-// Return a dedicated GPU device if there is one.
-fn find_discrete_gpu<'a, I>(devices: I) -> Option<vk::PhysicalDevice<'a>>
-where
-    I: IntoIterator<Item = vk::PhysicalDevice<'a>>,
-{
-    devices
-        .into_iter()
-        .find(|d| d.ty() == vk::PhysicalDeviceType::DiscreteGpu)
+// See the `nannou::wgpu::bytes` documentation for why the following are necessary.
+
+fn vertices_as_bytes(data: &[Vertex]) -> &[u8] {
+    unsafe { wgpu::bytes::from_slice(data) }
 }
 
-mod vs {
-    const _VS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib/glsl/vs.glsl"));
-    nannou::vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/lib/glsl/vs.glsl",
-    }
+fn uniforms_as_bytes(uniforms: &Uniforms) -> &[u8] {
+    unsafe { wgpu::bytes::from(uniforms) }
 }
 
-mod fs {
-    const _FS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib/glsl/fs.glsl"));
-    nannou::vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/lib/glsl/fs.glsl",
-    }
+fn instances_as_bytes(data: &[Instance]) -> &[u8] {
+    unsafe { wgpu::bytes::from_slice(data) }
 }

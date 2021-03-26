@@ -1,5 +1,4 @@
 /builds
 /target
 **/*.rs.bk
-Cargo.lock
 assets/config.json
