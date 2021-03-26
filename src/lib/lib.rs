@@ -52,6 +52,7 @@ fn model(app: &App) -> Model {
         .title("CBM 8032 VIS")
         .size(VIS_WINDOW_W, VIS_WINDOW_H)
         .view(vis_view)
+        .decorations(false)
         .build()
         .expect("failed to build visualisation window");
 
