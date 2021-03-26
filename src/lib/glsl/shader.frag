@@ -1,3 +1,8 @@
+// NOTE: This shader requires being manually compiled to SPIR-V. If you update
+// this shader, be sure to also re-compile it and update `frag.spv`. You can do
+// so using `glslangValidator` with the following command:
+// `glslangValidator -V shader.frag`
+
 #version 450
 
 layout(location = 0) in vec2 v_tex_coords;

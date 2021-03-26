@@ -1,3 +1,8 @@
+// NOTE: This shader requires being manually compiled to SPIR-V. If you update
+// this shader, be sure to also re-compile it and update `vert.spv`. You can do
+// so using `glslangValidator` with the following command:
+// `glslangValidator -V shader.vert`
+
 #version 450
 
 // The quad vertex positions.
