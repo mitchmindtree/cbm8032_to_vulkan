@@ -167,8 +167,14 @@ pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: Frame) 
     let mut encoder = frame.command_encoder();
     encoder.copy_buffer_to_buffer(&new_uniform_buffer, 0, &vis.graphics.uniform_buffer, 0, uniforms_size);
 
+    let load_op = wgpu::LoadOp::Load;
+    let clear_color = wgpu::Color::TRANSPARENT;
     let mut render_pass = wgpu::RenderPassBuilder::new()
-        .color_attachment(frame.texture_view(), |color| color)
+        .color_attachment(frame.texture_view(), |color| {
+            color
+                .load_op(load_op)
+                .clear_color(clear_color)
+        })
         .begin(&mut encoder);
     render_pass.set_bind_group(0, &vis.graphics.bind_group, &[]);
     render_pass.set_pipeline(&vis.graphics.pipeline);
@@ -262,51 +268,6 @@ fn init_graphics(
         _sampler: sampler,
     }
 }
-
-// // The render pass used for the graphics pipeline.
-// fn create_render_pass(
-//     device: Arc<vk::Device>,
-//     color_format: vk::Format,
-//     msaa_samples: u32,
-// ) -> Arc<dyn vk::RenderPassAbstract + Send + Sync> {
-//     let rp = vk::single_pass_renderpass!(
-//         device,
-//         attachments: {
-//             color: {
-//                 load: Load,
-//                 store: Store,
-//                 format: color_format,
-//                 samples: msaa_samples,
-//             }
-//         },
-//         pass: {
-//             color: [color],
-//             depth_stencil: {}
-//         }
-//     )
-//     .expect("failed to create renderpass");
-//     Arc::new(rp)
-// }
-
-// // Create the graphics pipeline for running the shaders.
-// fn create_pipeline(render_pass: Arc<RenderPassTy>) -> Arc<PipelineTy> {
-//     let device = render_pass.device().clone();
-//     let vs = vs::Shader::load(device.clone()).expect("failed to load vertex shader");
-//     let fs = fs::Shader::load(device.clone()).expect("failed to load fragment shader");
-//     let subpass = vk::Subpass::from(render_pass, 0).expect("no subpass for `id`");
-//     let pipeline = vk::GraphicsPipeline::start()
-//         //.sample_shading_enabled(1.0)
-//         .vertex_input(vk::OneVertexOneInstanceDefinition::<Vertex, Instance>::new())
-//         .vertex_shader(vs.main_entry_point(), ())
-//         .triangle_list()
-//         .viewports_dynamic_scissors_irrelevant(1)
-//         .fragment_shader(fs.main_entry_point(), ())
-//         .blend_alpha_blending()
-//         .render_pass(subpass)
-//         .build(device)
-//         .expect("failed to create graphics pipeline");
-//     Arc::new(pipeline)
-// }
 
 fn create_bind_group_layout(
     device: &wgpu::Device,
@@ -414,18 +375,6 @@ fn create_vertex_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     let usage = wgpu::BufferUsage::VERTEX;
     device.create_buffer_with_data(vertices_bytes, usage)
 }
-
-// // Create the buffer pool for submitting unique instance data each frame.
-// fn create_instance_data_buffer_pool(device: Arc<vk::Device>) -> vk::CpuBufferPool<Instance> {
-//     let usage = vk::BufferUsage::vertex_buffer();
-//     vk::CpuBufferPool::new(device, usage)
-// }
-//
-// // Create the buffer pool for the uniform data.
-// fn create_uniform_buffer_pool(device: Arc<vk::Device>) -> vk::CpuBufferPool<fs::ty::Data> {
-//     let usage = vk::BufferUsage::all();
-//     vk::CpuBufferPool::new(device, usage)
-// }
 
 // Create the sampler used for sampling the character sheet image in the fragment shader.
 fn create_sampler(device: &wgpu::Device) -> wgpu::Sampler {
