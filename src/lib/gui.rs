@@ -230,8 +230,11 @@ pub fn update(
     let srgb = Srgb::from_linear(lin_srgb);
     let color = color::Color::Rgba(srgb.red, srgb.green, srgb.blue, 1.0);
     let label_color = color::Color::Rgba(0.4, 0.4, 0.4, 1.0);
-    let label = format!("Hue: {:.2}", config.colouration.hue);
-    for new_hue in slider(config.colouration.hue, 0.0, 1.0)
+    const HUE_YELLOW: f32 = 0.2;
+    const HUE_BLUE: f32 = 0.6;
+    let label_hue = map_range(config.colouration.hue, HUE_YELLOW, HUE_BLUE, 0.0, 1.0);
+    let label = format!("Hue: {:.3}", label_hue);
+    for new_hue in slider(config.colouration.hue, HUE_YELLOW, HUE_BLUE)
         .color(color)
         .down(PAD)
         .label(&label)
