@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 /// program closes.
 ///
 /// If no `assets/config.json` exists, a default one will be created.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub on_startup: OnStartup,
     #[serde(default)]
     pub colouration: Colouration,
+    #[serde(default = "default::sustain")]
+    pub sustain: f32,
 }
 
 /// Items that should run on startup.
@@ -54,6 +56,16 @@ impl Default for Colouration {
     }
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            on_startup: Default::default(),
+            colouration: Default::default(),
+            sustain: default::sustain(),
+        }
+    }
+}
+
 /// The path to the configuration file.
 pub fn path(assets: &Path) -> PathBuf {
     assets.join("config.json")
@@ -85,5 +97,9 @@ pub mod default {
         pub fn alpha() -> f32 {
             1.0
         }
+    }
+
+    pub fn sustain() -> f32 {
+        0.5
     }
 }

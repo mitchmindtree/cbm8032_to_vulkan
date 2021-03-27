@@ -12,7 +12,7 @@ pub const COLUMN_W: Scalar = 240.0;
 pub const DEFAULT_WIDGET_H: Scalar = 30.0;
 pub const PAD: Scalar = 20.0;
 pub const WINDOW_WIDTH: u32 = (COLUMN_W + PAD * 2.0) as u32;
-pub const WINDOW_HEIGHT: u32 = 720;
+pub const WINDOW_HEIGHT: u32 = 770;
 
 widget_ids! {
     pub struct Ids {
@@ -36,6 +36,7 @@ widget_ids! {
         saturation_slider,
         brightness_slider,
         alpha_slider,
+        sustain_slider,
         serial_port_info_text,
     }
 }
@@ -228,7 +229,7 @@ pub fn update(
     let lin_srgb: LinSrgb = hsv.into();
     let srgb = Srgb::from_linear(lin_srgb);
     let color = color::Color::Rgba(srgb.red, srgb.green, srgb.blue, 1.0);
-    let label_color = color.plain_contrast();
+    let label_color = color::Color::Rgba(0.4, 0.4, 0.4, 1.0);
     let label = format!("Hue: {:.2}", config.colouration.hue);
     for new_hue in slider(config.colouration.hue, 0.0, 1.0)
         .color(color)
@@ -271,6 +272,17 @@ pub fn update(
         .set(ids.alpha_slider, ui)
     {
         config.colouration.alpha = new_alpha;
+    }
+
+    let label = format!("Sustain: {:.2}", config.sustain);
+    for new_sustain in slider(config.sustain, 0.0, 1.0)
+        .color(color)
+        .label(&label)
+        .label_color(label_color)
+        .down(PAD * 0.5)
+        .set(ids.sustain_slider, ui)
+    {
+        config.sustain = new_sustain;
     }
 
     // Serial port info

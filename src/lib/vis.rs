@@ -3,6 +3,7 @@
 use crate::conf::Config;
 use nannou::image;
 use nannou::prelude::*;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 const CHAR_SHEET_FILE_NAME: &str = "PetASCII_Combined.png";
@@ -15,14 +16,15 @@ const TOTAL_LINES: u8 = DATA_LINES + BLANK_LINES;
 const GRAPHICS_MODE_ROW_OFFSET: u8 = 0;
 const TEXT_MODE_ROW_OFFSET: u8 = 16;
 const VERTEX_COUNT: usize = 6;
+const DECAY_IMAGE_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 pub const CBM_8032_FRAME_DATA_LEN: usize = CHARS_PER_LINE as usize * DATA_LINES as usize;
 
 /// Items related to the visualisation.
 pub struct Vis {
     _char_sheet: wgpu::Texture,
-    _char_sheet_view: wgpu::TextureView,
-    graphics: Graphics,
+    char_sheet_view: wgpu::TextureView,
+    graphics: RefCell<Graphics>,
 }
 
 /// The frame type representing all data necessary for displaying a single frame.
@@ -47,13 +49,22 @@ struct Graphics {
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
+    decay: Decay,
     _sampler: wgpu::Sampler,
+}
+
+struct Decay {
+    texture: wgpu::Texture,
+    texture_view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 struct Uniforms {
     colouration: [f32; 4],
+    sustain: f32,
 }
 
 // Vertex type used for GPU geometry.
@@ -117,10 +128,11 @@ pub fn init(assets_path: &Path, window: &nannou::window::Window, msaa_samples: u
     let char_sheet = load_char_sheet(assets_path, window);
     let char_sheet_view = char_sheet.view().build();
     let device = window.swap_chain_device();
-    let graphics = init_graphics(device, msaa_samples, &char_sheet_view);
+    let (w, h) = window.inner_size_pixels();
+    let graphics = RefCell::new(init_graphics(device, [w, h], msaa_samples, &char_sheet_view));
     Vis {
         _char_sheet: char_sheet,
-        _char_sheet_view: char_sheet_view,
+        char_sheet_view,
         graphics,
     }
 }
@@ -134,7 +146,8 @@ pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: Frame) 
     let hsv = config.colouration.hsv();
     let lin_srgb: LinSrgb = hsv.into();
     let colouration = [lin_srgb.red, lin_srgb.green, lin_srgb.blue, config.colouration.alpha];
-    let uniforms = Uniforms { colouration };
+    let sustain = config.sustain;
+    let uniforms = Uniforms { colouration, sustain };
     let uniforms_size = std::mem::size_of::<Uniforms>() as wgpu::BufferAddress;
     let uniforms_bytes = uniforms_as_bytes(&uniforms);
     let usage = wgpu::BufferUsage::COPY_SRC;
@@ -163,26 +176,54 @@ pub fn view(config: &Config, vis: &Vis, cbm_frame: &Cbm8032Frame, frame: Frame) 
     let usage = wgpu::BufferUsage::VERTEX;
     let instance_buffer = device.create_buffer_with_data(instances_bytes, usage);
 
+    // If the window changed sizes, we need to recreate the decay buffer and in turn, the whole
+    // graphics pipeline.
+    let frame_wh = frame.texture_size();
+    let frame_msaa_samples = frame.texture_msaa_samples();
+    if vis.graphics.borrow().decay.texture_view.size() != frame.texture_size() {
+        let new_graphics = init_graphics(device, frame_wh, frame_msaa_samples, &vis.char_sheet_view);
+        vis.graphics.replace(new_graphics);
+    }
+
     // Encode the new buffer copies and the render pass.
     let mut encoder = frame.command_encoder();
-    encoder.copy_buffer_to_buffer(&new_uniform_buffer, 0, &vis.graphics.uniform_buffer, 0, uniforms_size);
+    let graphics = vis.graphics.borrow();
+    encoder.copy_buffer_to_buffer(&new_uniform_buffer, 0, &graphics.uniform_buffer, 0, uniforms_size);
 
-    let load_op = wgpu::LoadOp::Load;
-    let clear_color = wgpu::Color::TRANSPARENT;
-    let mut render_pass = wgpu::RenderPassBuilder::new()
-        .color_attachment(frame.texture_view(), |color| {
-            color
-                .load_op(load_op)
-                .clear_color(clear_color)
-        })
-        .begin(&mut encoder);
-    render_pass.set_bind_group(0, &vis.graphics.bind_group, &[]);
-    render_pass.set_pipeline(&vis.graphics.pipeline);
-    render_pass.set_vertex_buffer(0, &vis.graphics.vertex_buffer, 0, 0);
-    render_pass.set_vertex_buffer(1, &instance_buffer, 0, 0);
-    let vertex_range = 0..VERTEX_COUNT as u32;
-    let instance_range = 0..instances.len() as u32;
-    render_pass.draw(vertex_range, instance_range);
+    // Render pass for rendering to the decay image.
+    {
+        let decay = &graphics.decay;
+        let load_op = wgpu::LoadOp::Load;
+        let clear_color = wgpu::Color::TRANSPARENT;
+        let mut render_pass = wgpu::RenderPassBuilder::new()
+            .color_attachment(&decay.texture_view, |color| {
+                color
+                    .load_op(load_op)
+                    .clear_color(clear_color)
+            })
+            .begin(&mut encoder);
+        render_pass.set_bind_group(0, &decay.bind_group, &[]);
+        render_pass.set_pipeline(&decay.pipeline);
+        render_pass.set_vertex_buffer(0, &graphics.vertex_buffer, 0, 0);
+        render_pass.set_vertex_buffer(1, &instance_buffer, 0, 0);
+        let vertex_range = 0..VERTEX_COUNT as u32;
+        let instance_range = 0..instances.len() as u32;
+        render_pass.draw(vertex_range, instance_range);
+    }
+
+    // Render pass for rendering to the swapchain image.
+    {
+        let mut render_pass = wgpu::RenderPassBuilder::new()
+            .color_attachment(frame.texture_view(), |color| color)
+            .begin(&mut encoder);
+        render_pass.set_bind_group(0, &graphics.bind_group, &[]);
+        render_pass.set_pipeline(&graphics.pipeline);
+        render_pass.set_vertex_buffer(0, &graphics.vertex_buffer, 0, 0);
+        render_pass.set_vertex_buffer(1, &instance_buffer, 0, 0);
+        let vertex_range = 0..VERTEX_COUNT as u32;
+        let instance_range = 0..instances.len() as u32;
+        render_pass.draw(vertex_range, instance_range);
+    }
 }
 
 /// Given a byte value from the serial data, return the column and row of the character within the
@@ -227,6 +268,7 @@ fn load_char_sheet(assets_path: &Path, window: &nannou::window::Window) -> wgpu:
 // Initialise the WGPU graphics state.
 fn init_graphics(
     device: &wgpu::Device,
+    swap_chain_dims: [u32; 2],
     msaa_samples: u32,
     char_sheet: &wgpu::TextureView,
 ) -> Graphics {
@@ -234,11 +276,10 @@ fn init_graphics(
     let vs_mod = wgpu::shader_from_spirv_bytes(device, include_bytes!("glsl/vert.spv"));
     let fs_mod = wgpu::shader_from_spirv_bytes(device, include_bytes!("glsl/frag.spv"));
 
-    // let render_pass = create_render_pass(device.clone(), color_format, msaa_samples);
-
     // Initialise the uniform buffer.
     let colouration = [0.0; 4];
-    let uniforms = Uniforms { colouration };
+    let sustain = 1.0;
+    let uniforms = Uniforms { colouration, sustain };
     let uniforms_bytes = uniforms_as_bytes(&uniforms);
     let usage = wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST;
     let uniform_buffer = device.create_buffer_with_data(uniforms_bytes, usage);
@@ -246,8 +287,28 @@ fn init_graphics(
     // For sampling the char sheet.
     let sampler = create_sampler(device);
 
-    let bind_group_layout = create_bind_group_layout(device, char_sheet.component_type());
-    let bind_group = create_bind_group(device, &bind_group_layout, &uniform_buffer, char_sheet, &sampler);
+    let decay = init_decay(
+        device,
+        swap_chain_dims,
+        &vs_mod,
+        char_sheet,
+        &uniform_buffer,
+        &sampler,
+    );
+
+    let bind_group_layout = create_bind_group_layout(
+        device,
+        char_sheet.component_type(),
+        decay.texture.component_type(),
+    );
+    let bind_group = create_bind_group(
+        device,
+        &bind_group_layout,
+        &uniform_buffer,
+        char_sheet,
+        &decay.texture_view,
+        &sampler,
+    );
     let pipeline_layout = create_pipeline_layout(device, &bind_group_layout);
     let pipeline = create_pipeline(
         device,
@@ -265,11 +326,70 @@ fn init_graphics(
         bind_group,
         vertex_buffer,
         uniform_buffer,
+        decay,
         _sampler: sampler,
     }
 }
 
+fn init_decay(
+    device: &wgpu::Device,
+    swap_chain_dims: [u32; 2],
+    vs_mod: &wgpu::ShaderModule,
+    char_sheet: &wgpu::TextureView,
+    uniform_buffer: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+) -> Decay {
+    let fs_mod = wgpu::shader_from_spirv_bytes(device, include_bytes!("glsl/decay_frag.spv"));
+    let texture = wgpu::TextureBuilder::new()
+        .size(swap_chain_dims)
+        .usage(wgpu::TextureUsage::OUTPUT_ATTACHMENT | wgpu::TextureUsage::SAMPLED)
+        .format(DECAY_IMAGE_TEXTURE_FORMAT)
+        .build(device);
+    let texture_view = texture.view().build();
+    let bind_group_layout = create_decay_bind_group_layout(device, char_sheet.component_type());
+    let bind_group = create_decay_bind_group(device, &bind_group_layout, &uniform_buffer, char_sheet, &sampler);
+    let pipeline_layout = create_pipeline_layout(device, &bind_group_layout);
+    let msaa_samples = 1;
+    let pipeline = create_pipeline(
+        device,
+        &pipeline_layout,
+        &vs_mod,
+        &fs_mod,
+        texture_view.format(),
+        msaa_samples,
+    );
+    Decay {
+        texture,
+        texture_view,
+        bind_group,
+        pipeline,
+    }
+}
+
 fn create_bind_group_layout(
+    device: &wgpu::Device,
+    char_sheet_texture_component_type: wgpu::TextureComponentType,
+    decay_texture_component_type: wgpu::TextureComponentType,
+) -> wgpu::BindGroupLayout {
+    wgpu::BindGroupLayoutBuilder::new()
+        .uniform_buffer(wgpu::ShaderStage::FRAGMENT, false)
+        .sampled_texture(
+            wgpu::ShaderStage::FRAGMENT,
+            false,
+            wgpu::TextureViewDimension::D2,
+            char_sheet_texture_component_type,
+        )
+        .sampled_texture(
+            wgpu::ShaderStage::FRAGMENT,
+            false,
+            wgpu::TextureViewDimension::D2,
+            decay_texture_component_type,
+        )
+        .sampler(wgpu::ShaderStage::FRAGMENT)
+        .build(device)
+}
+
+fn create_decay_bind_group_layout(
     device: &wgpu::Device,
     texture_component_type: wgpu::TextureComponentType,
 ) -> wgpu::BindGroupLayout {
@@ -289,12 +409,28 @@ fn create_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniform_buffer: &wgpu::Buffer,
-    texture_view: &wgpu::TextureView,
+    char_sheet_texture_view: &wgpu::TextureView,
+    decay_texture_view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     wgpu::BindGroupBuilder::new()
         .buffer::<Uniforms>(uniform_buffer, 0..1)
-        .texture_view(texture_view)
+        .texture_view(char_sheet_texture_view)
+        .texture_view(decay_texture_view)
+        .sampler(sampler)
+        .build(device, layout)
+}
+
+fn create_decay_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buffer: &wgpu::Buffer,
+    char_sheet_texture_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    wgpu::BindGroupBuilder::new()
+        .buffer::<Uniforms>(uniform_buffer, 0..1)
+        .texture_view(char_sheet_texture_view)
         .sampler(sampler)
         .build(device, layout)
 }
@@ -331,8 +467,6 @@ fn create_pipeline(
         .sample_count(sample_count)
         .build(device)
 }
-
-
 
 // Create a vertex buffer containing the two triangles that make up a single character slot.
 fn create_vertex_buffer(device: &wgpu::Device) -> wgpu::Buffer {
